@@ -32,24 +32,60 @@ PR_BODY = """\
 All three live in the same monorepo, `wangbodbs/dsh-plugins`, as separately
 installable subpackages under `packages/` — one entry per subdirectory.
 
-- `packages/dsh-feishu` — a Feishu / Lark chat channel for DSH (`notify`). Each
-  chat maps to a DSH session; messages become turns and answers are pushed back
-  as cards. It ships three tools (`feishu_send`, `feishu_ask`,
-  `feishu_drive_pull`) and slash commands for permission mode, model selection,
-  and conversation generations. No runtime dependencies.
-- `packages/dsh-mcp-flapi` — registers FilmLight's official FLAPI MCP assistant
-  (`flapi-dev-mcp`) as an MCP server in DSH (`tools`).
-- `packages/dsh-mcp-davinci-resolve` — registers the MCP server built into
-  DaVinci Resolve 21.1+ as an MCP server in DSH (`tools`).
+**What each one is**
 
-Verified before submitting: each subpackage installs on its own from this
-repository with the subdirectory selector, into a clean profile —
+- `packages/dsh-feishu` (`notify`) — a Feishu / Lark chat channel. Each chat maps
+  to a DSH session, messages become turns, and answers go back as cards. Three
+  tools: `feishu_send`, `feishu_ask` (a question card with buttons and a
+  free-text note field), `feishu_drive_pull` (walks a shared Drive folder and
+  rebuilds its tree locally). Slash commands drive `/permission`, `/model`,
+  `/sessions`, `/open`, `/new` and `/approval` through interactive cards.
+  Inbound files and images are downloaded into the workspace, chunked when they
+  are large. No runtime dependencies — the Lark WebSocket framing is hand-rolled
+  protobuf over Node's built-in WebSocket.
+- `packages/dsh-mcp-flapi` (`tools`) — starts FilmLight's official FLAPI MCP
+  assistant (`flapi-dev-mcp`) and registers it as an MCP server in DSH.
+- `packages/dsh-mcp-davinci-resolve` (`tools`) — starts the MCP server built
+  into DaVinci Resolve 21.1+ and registers it as an MCP server in DSH.
+
+The two `dsh-mcp-*` packages are registration bundles, not reimplementations:
+the tools belong to FilmLight and Blackmagic, and the code here locates the
+server, starts it, wires it into DSH's MCP registry, and reports what it found.
+They also appear to be the first entries in this list for either application.
+
+**On `dsh-feishu`, which is the one that may already be covered**
+
+`notify` already carries several Lark / Feishu bridges — `PlutoKeating/dsh-lark-bot`,
+`imetn/dsh-lark-bridge`, `shrekcg/dsh-im-channel`. This is not a fork of any of
+them and does not depend on them. Against the closest of the three
+(`imetn/dsh-lark-bridge`: bidirectional, cards, approvals, attachments), what
+this one carries that I could not find there is: slash-command cards that switch
+the session's **file-sandbox mode**, **model**, and **conversation generation**;
+an ask-card with a free-text answer field; recursive Drive-folder pull; Range
+chunking for large inbound files; and zero runtime dependencies.
+
+That may or may not be enough to earn a second slot in a crowded category — the
+comparison is yours to make, and I would rather put it in front of you than have
+you find it after merging. If you think it is covered, say so and I will drop
+that entry and keep the other two.
+
+**Pre-flight**
+
+Each subpackage installs on its own from this repository with the subdirectory
+selector, into a clean profile, with no build step:
 
     dsh plugin --profile probe add \\
       "git+https://github.com/wangbodbs/dsh-plugins.git#path:/packages/dsh-feishu"
 
-— which resolves and composes without a build step (`dsh --profile probe
---dump-config` exits 0 with all three rows in the tree).
+`dsh --profile probe --dump-config` exits 0 with all three rows in the tree
+(4.8s / 7.3s / 6.6s).
+
+I also reproduced this list's own `pr-check` locally against these three files
+before opening: `generate-readme.mjs` parses all 4385 entries and renders the
+three rows in both locales, `awesome-lint` exits 0 with no warning on any of
+them, the three `node --test` suites pass, and `build-site.mjs` (with
+`SKIP_PUBLISH_CHECKS=1`, as in the workflow) reports
+`site built: 4385 rows x 2 locales + sitemap + count badge`.
 """
 
 

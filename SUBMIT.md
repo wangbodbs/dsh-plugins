@@ -38,6 +38,47 @@ python3 scripts/open-catalog-pr.py --pr       # 隔一天再跑：真正开 PR�
 | 分支 | `add-wangbodbs-dsh-plugins` @ `1a8e134d`（1 提交 / 只加 3 个文件） |
 | PR | ⏳ 未开 —— **卡在仓库满 1 天门槛**：`wangbodbs/dsh-plugins` 创建于 2026-09-29T01:28:29Z，**2026-09-30 09:28（北京时间）之后**才能提 |
 
+## ✅ 本地预演：把上游 CI 在自己机器上跑了一遍（2026-09-29）
+
+等 24h 的时间里，把上游 `pr-check` 的每一步在本地复现了一遍（`data/plugins/` 放进三个条目并提交，
+**必须提交** —— 见下面「收录日期」一条）。结论：**全绿**。
+
+| 上游 CI 步骤 | 本地结果 |
+|---|---|
+| 每个条目文件以 `.yml` 结尾 | ✅ |
+| 条目文件放在 `data/plugins/` | ✅ |
+| stale-fork guard（删掉的条目 ≤ 2） | ✅ 删 0 个 |
+| 「只改 README 不改条目」守卫 | ✅ 我们改了 `data/plugins/` |
+| `generate-readme.mjs` | ✅ `4385 entries`，三条行在 `README.md` / `README.zh.md` 都渲染出来 |
+| `awesome-lint` | ✅ **exit 0**，96 条警告全是既有条目，**我们三行零警告** |
+| `added-dates` / `capabilities` / `adopt-discussions` 单测 | ✅ 三个都过 |
+| `build-site.mjs`（`SKIP_PUBLISH_CHECKS=1`，与 workflow 同 env） | ✅ `site built: 4385 rows × 2 locales + sitemap + count badge` |
+
+两个坑记下来，免得以后重踩：
+
+1. **`build-site.mjs` 要求条目的「收录日期」可从 git 历史推导**（`scripts/lib/added-dates.mjs`：
+   `git log --diff-filter=A -- data/plugins/<文件>` 取**最老**的那次添加）。所以条目文件**必须是提交**——
+   只 `cp` 进去不提交，日期推不出来，build 直接拒；浅克隆（`--depth 1`）同理。
+2. 本地跑 `npm`/`npx` 要显式 `--cache`（本机 `~/.npm` 里有以前 sudo 留下的 root 属主文件，默认缓存 EPERM）。
+
+## ⚠️ 去重尽调：`dsh-feishu` 落在拥挤分类里
+
+`notify` 分类下**已有 3 个 Lark/飞书桥**：`PlutoKeating/dsh-lark-bot`、`imetn/dsh-lark-bridge`、
+`shrekcg/dsh-im-channel`，另有 `CAI-MH/dsh-feishu-task-recorder`、`zhuiyueya/dsh-im-gateway`。
+其中 **`imetn/dsh-lark-bridge`** 的描述（双向、卡片、审批、附件）与本包高度重合 ——
+而上游评审规则第 4 条正是「**是否已被现有条目覆盖**」（先来者保留位置，但「规则不是先来后到，
+规则是谁更好」，且「更好的分叉确实会被收录」）。
+
+⇒ 处理方式：**PR 正文里主动摆出这个对比** —— 列出 `PlutoKeating/dsh-lark-bot` /
+`imetn/dsh-lark-bridge` / `shrekcg/dsh-im-channel` 三个既有条目，并明确说明本包**不是**它们的分叉，
+以及在最近的 `imetn/dsh-lark-bridge` 之外还多了什么（`/permission` 切沙盒模式、`/model` 切模型、
+`/sessions` 切会话代次、带输入框的提问卡片、云盘文件夹递归拉取、大文件 Range 分片、零运行时依赖），
+最后写明「如果判定为已覆盖，请直说，我就撤掉这一条、保留另外两条」。
+**不要等评审来问** —— 这也是上游说的「夸大是让本来不错的插件被打回的主要原因」的反面用法。
+
+另外两条 `dsh-mcp-*` 在目录里**没有同类条目**（`grep -i davinci|baselight|flapi|filmlight` 只命中我们自己加的），
+是这两个应用的**首例**。
+
 
 ## ⚠️ 硬门槛：仓库创建满 1 天
 
