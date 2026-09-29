@@ -125,6 +125,32 @@ bash scripts/sync-from-workspace.sh /别的/路径
 脚本只覆盖 `packages/*/lib`、`tools`、`README.md`、`cordis.patch.yml`，**不会**覆盖各包的
 `package.json`（发布元数据是这里手工维护的）与 `LICENSE`。
 
+### ⚠️ 单向：**要改内容，改工作区的权威源**
+
+`README.md` 在同步范围内，所以**任何针对公开仓库的内容修改（隐私清洗、安装命令、错别字）
+都必须改在工作区的 `dsh-feishu/README.md` / `dsh-mcp-bundles/*/README.md`，再跑同步**。
+2026-09-29 踩过一次：把 `/Users/wangbo/...` 的私人路径只在本仓库里洗成占位符，随后一跑同步
+就被工作区版本覆盖回来了（`README.md` 是同步项，`SUBMIT.md` 和 `package.json` 不是 —— 后者可以直接在这里改）。
+
+工作区源改完，记得把备份副本也刷一遍（否则灾难恢复还原出来的又是旧文本）：
+
+```sh
+# dsh-feishu 的备份副本
+cp ~/Downloads/DSH/dsh-feishu/README.md ~/Downloads/DSH/mnemon/infra/tools/dsh-feishu/README.md
+# 两个 MCP 包的备份副本
+for p in dsh-mcp-flapi dsh-mcp-davinci-resolve; do
+  cp ~/Downloads/DSH/dsh-mcp-bundles/$p/README.md \
+     ~/Downloads/DSH/mnemon/infra/tools/dsh-mcp-sources/$p/README.md
+done
+```
+
+### 安装命令必须是访客能跑的
+
+`packages/*/README.md` 是市场详情页链过去的那份文档，里面的安装命令**必须在公开仓库里成立**。
+2026-09-29 修掉的三处：`dist/dsh-feishu-*.tgz`（`dist/` 根本不在仓库里）与两个裸包名
+`dsh plugin add dsh-mcp-flapi` / `dsh-mcp-davinci-resolve`（这两个包**从未发布到 npm**，会 404）。
+正确形态统一是上面那条 `#path:` 子目录选择器。
+
 ## 收录要求速查（来自 contributing.md）
 
 - `package.json` 声明 `dsh.bundle`（**只声明 `dsh.client` 会被 CI 拒**）
