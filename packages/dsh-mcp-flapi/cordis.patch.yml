@@ -1,0 +1,37 @@
+# dsh-mcp-flapi — bundle patch layer.
+#
+# Installed via the official CLI:
+#
+#   dsh plugin --profile web add dsh-mcp-flapi
+#
+# `dsh plugin` adds this package to the profile's `dsh.profile.bundles`, the boot
+# merges this patch, and the row below loads this package's `lib/index.mjs`.
+# That module locates the `flapi-dev-mcp` executable and hands it to the stock
+# `@deepseek-ai/dsh-mcp-client`.
+#
+# PREREQUISITE — install FilmLight's MCP first (it is a uv tool, not an npm
+# package, so this bundle cannot pull it in):
+#
+#   uv tool install --with "mcp<2" git+https://github.com/FilmLightAPI/flapi-dev-mcp
+#   flapi-dev-mcp init
+#
+# The `--with "mcp<2"` pin is REQUIRED. Upstream declares `mcp>=1.2.0` with no
+# upper bound, so uv resolves the mcp 2.x SDK, whose `FastMCP` was renamed to
+# `MCPServer`; flapi-dev-mcp 0.2.2 still imports the v1 path and crashes on
+# startup. `dsh-mcp-flapi-setup` (shipped as a bin) runs the pinned command for
+# you.
+#
+# Overrides: every key below is optional and merged over the defaults.
+#
+#   - id: mcp-flapi
+#     name: dsh-mcp-flapi
+#     config:
+#       serverName: flapi              # -> mcp__flapi__<tool>
+#       command: /path/to/flapi-dev-mcp # else auto-detected, or $FLAPI_DEV_MCP_PATH
+#       toolCallTimeoutMs: 180000
+#
+# To disable without uninstalling: add `- id: mcp-flapi` + `disabled: true` to
+# the profile's own cordis.patch.yml.
+- insert:
+    - id: mcp-flapi
+      name: dsh-mcp-flapi

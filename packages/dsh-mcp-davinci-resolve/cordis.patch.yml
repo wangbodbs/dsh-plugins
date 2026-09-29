@@ -1,0 +1,32 @@
+# dsh-mcp-davinci-resolve — bundle patch layer.
+#
+# Installed via the official CLI:
+#
+#   dsh plugin --profile web add dsh-mcp-davinci-resolve
+#
+# `dsh plugin` adds this package to the profile's `dsh.profile.bundles`, the boot
+# merges this patch, and the row below loads this package's `lib/index.mjs`.
+# That module locates Resolve's built-in MCP binary for the current platform and
+# hands it to the stock `@deepseek-ai/dsh-mcp-client`, so the server's tools
+# appear to the model as `mcp__resolve__<tool>`.
+#
+# Why a module instead of declaring the mcp-client row right here: the patch
+# dialect has no path expansion (the documented `!!js` tag is not implemented in
+# dsh 0.1.5-rc.2), and the Resolve binary lives at a different absolute path on
+# each platform. Computing it in JS keeps this file portable.
+#
+# Overrides: every key below is optional. Anything you set is merged over the
+# defaults, so you can rename the tool namespace or pin an explicit binary.
+#
+#   - id: mcp-resolve
+#     name: dsh-mcp-davinci-resolve
+#     config:
+#       serverName: resolve          # -> mcp__resolve__<tool>
+#       command: /path/to/ResolveMCP # else auto-detected, or $RESOLVE_MCP_PATH
+#       toolCallTimeoutMs: 180000
+#
+# To disable without uninstalling: add `- id: mcp-resolve` + `disabled: true` to
+# the profile's own cordis.patch.yml.
+- insert:
+    - id: mcp-resolve
+      name: dsh-mcp-davinci-resolve

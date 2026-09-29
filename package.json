@@ -1,0 +1,25 @@
+{
+  "name": "dsh-plugins",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DeepSeek Harness plugins: a Feishu (Lark) chat channel and two MCP server bundles (DaVinci Resolve, FilmLight FLAPI). 达芬奇与 FilmLight FLAPI 的 MCP 桥，以及飞书对话通道。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "mcp",
+    "feishu",
+    "davinci-resolve",
+    "baselight"
+  ],
+  "license": "MIT",
+  "author": "wangbodbs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangbodbs/dsh-plugins.git"
+  },
+  "homepage": "https://github.com/wangbodbs/dsh-plugins#readme",
+  "bugs": {
+    "url": "https://github.com/wangbodbs/dsh-plugins/issues"
+  }
+}

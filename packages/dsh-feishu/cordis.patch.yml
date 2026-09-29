@@ -1,0 +1,49 @@
+# dsh-feishu — bundle patch layer.
+#
+# Installed via the official CLI:
+#
+#   dsh plugin --profile web add "$(ls -1 dist/dsh-feishu-*.tgz | sort -V | tail -1)"  # 别写死版本号
+#
+# `dsh plugin` adds this package to the profile's `dsh.profile.bundles`, boot
+# merges this patch, and the row below loads `lib/index.mjs`, which:
+#
+#   * opens a WebSocket *long connection* to Feishu and receives
+#     `im.message.receive_v1` (no public URL needed — a desktop DSH is
+#     unreachable from Feishu's servers);
+#   * binds each Feishu chat to one DSH session (`feishu-<chat_id>`), turns an
+#     inbound message into a user turn, and pushes the reply back;
+#   * registers a `feishu_send` tool so the agent can report progress itself.
+#
+# PREREQUISITES on the Feishu side (open.feishu.cn → your self-built app):
+#   1. 添加「机器人」能力.
+#   2. 权限: im:message, im:message:send_as_bot, im:message.p2p_msg:readonly
+#      (plus im:message.group_at_msg:readonly for group chats).
+#   3. 事件订阅 → 订阅方式选「使用长连接接收事件」, 添加事件 im.message.receive_v1.
+#      Do NOT configure a request URL: with a URL set, events go there instead.
+#   4. 创建版本并发布.
+#
+# Overrides: every key below is optional and merged over the defaults. The GUI
+# settings section (设置 → 飞书) writes the same keys, and takes effect without
+# a restart. NOTE: a later patch layer REPLACES this whole config object, so
+# restate every field you care about.
+#
+#   - id: feishu
+#     name: dsh-feishu
+#     config:
+#       enabled: true
+#       appId: cli_xxxxxxxxxxxxxxxx
+#       appSecret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#       cwd: /Users/you/project        # workspace new sessions use
+#       allowedChatIds: [oc_xxxxxxxx]  # empty = any chat may drive the agent
+#       ackReaction: true
+#       replyToChat: true
+#
+# Disabled by default: with `enabled: false` (or empty credentials) the plugin
+# loads, registers its settings section and its tool, and opens no socket.
+- insert:
+    - id: feishu
+      name: dsh-feishu
+      config:
+        enabled: false
+        appId: ''
+        appSecret: ''
