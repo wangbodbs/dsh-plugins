@@ -13,10 +13,31 @@
 
 ## 提 PR 的步骤
 
-1. Fork `awesome-dsh-plugin/awesome-dsh-plugin`。
-2. 把 `submission/` 里的三个 yml 原样放进 fork 的 `data/plugins/`。
-   **只加这一个目录里的文件，不要手工编辑生成出来的 README。**
-3. 提 PR。一个 PR 最多 3 条，这三条正好用满。
+已经脚本化 —— `scripts/open-catalog-pr.py`（用 Python 标准库，无需装东西；token 读
+`$GITHUB_TOKEN` 或 `~/.dsh/.github-token`，**token 不进仓库**）：
+
+```sh
+python3 scripts/open-catalog-pr.py --status   # 看进度：仓库年龄、上游分支、有没有已开的 PR
+python3 scripts/open-catalog-pr.py            # 准备：建 fork + 把三个条目推到一个分支（幂等）
+python3 scripts/open-catalog-pr.py --pr       # 隔一天再跑：真正开 PR（会先查 24h 门槛，没到就拒）
+```
+
+它做的是手写步骤本来要做的事：fork 上游 → 在 fork 上建一个**只含这三个文件**的提交
+（`data/plugins/<名>.yml`，用 Git Data API 一次性提交，不是三次）→ 开 PR。
+**不会碰上游任何既有条目**（CI 的 gate 会列出 PR 修改的每一个既有条目，所以这条要守住）。
+
+手工做法（脚本坏了时用）：fork `awesome-dsh-plugin/awesome-dsh-plugin`，把 `submission/` 里的
+三个 yml 原样放进 fork 的 `data/plugins/`，提 PR。**只加文件，不要手工编辑生成出来的 README。**
+
+### 当前状态（2026-09-29）
+
+| 项 | 值 |
+|---|---|
+| 上游 | `awesome-dsh-plugin/awesome-dsh-plugin` |
+| fork | `wangbodbs/awesome-dsh-plugin` |
+| 分支 | `add-wangbodbs-dsh-plugins` @ `1a8e134d`（1 提交 / 只加 3 个文件） |
+| PR | ⏳ 未开 —— **卡在仓库满 1 天门槛**：`wangbodbs/dsh-plugins` 创建于 2026-09-29T01:28:29Z，**2026-09-30 09:28（北京时间）之后**才能提 |
+
 
 ## ⚠️ 硬门槛：仓库创建满 1 天
 
