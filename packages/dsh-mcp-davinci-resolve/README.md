@@ -6,8 +6,11 @@
 
 ## 安装
 
+「设置 → 插件市场」里搜 `dsh-mcp-davinci-resolve`，或者直接（这个包不在 npm 上，走仓库子目录）：
+
 ```bash
-dsh plugin --profile web add dsh-mcp-davinci-resolve
+dsh plugin --profile web add \
+  "git+https://github.com/wangbodbs/dsh-plugins.git#path:/packages/dsh-mcp-davinci-resolve"
 ```
 
 `web` 换成你的 profile 名即可（桌面版通常也是 `web`）。装完重启或热重载 DSH。

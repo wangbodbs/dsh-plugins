@@ -11,8 +11,9 @@
 **两步。** 第一步装插件，第二步装 FilmLight 那个 uv 工具（它不是 npm 包，插件拉不进来）。
 
 ```bash
-# 1) 插件
-dsh plugin --profile web add dsh-mcp-flapi
+# 1) 插件（不在 npm 上，走仓库子目录；市场里也能一键装）
+dsh plugin --profile web add \
+  "git+https://github.com/wangbodbs/dsh-plugins.git#path:/packages/dsh-mcp-flapi"
 
 # 2) FilmLight 的 MCP（注意 mcp<2 这个 pin，原因见下）
 npx dsh-mcp-flapi-setup

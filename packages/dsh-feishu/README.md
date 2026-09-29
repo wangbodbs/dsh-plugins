@@ -56,6 +56,17 @@ pnpm 会拦掉构建脚本。这个插件两样都避开了。
 
 ## 安装
 
+**一、从插件市场或 GitHub 装（普通用户）**
+
+「设置 → 插件市场」里搜 `dsh-feishu`，或者直接：
+
+```bash
+dsh plugin --profile web add \
+  "git+https://github.com/wangbodbs/dsh-plugins.git#path:/packages/dsh-feishu"
+```
+
+**二、从源码打 tarball 装（改这个插件时用）**
+
 ```bash
 cd /path/to/this/repo/dsh-feishu
 mkdir -p dist
@@ -74,9 +85,7 @@ dsh plugin --profile web add "$(ls -1 dist/dsh-feishu-*.tgz | sort -V | tail -1)
 
 两种方式，二选一：
 
-**A. GUI 设置面板（推荐）** —— 「设置 → 插件 → 飞书」：
-
-![面板字段见下表]
+**A. GUI 设置面板（推荐）** —— 「设置 → 插件 → 飞书」。
 
 面板由插件的**浏览器端**提供（`lib/client.js`），包含：
 
