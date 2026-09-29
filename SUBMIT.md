@@ -36,6 +36,7 @@ python3 scripts/open-catalog-pr.py --pr       # 隔一天再跑：真正开 PR�
 | 上游 | `awesome-dsh-plugin/awesome-dsh-plugin` |
 | fork | `wangbodbs/awesome-dsh-plugin` |
 | 分支 | `add-wangbodbs-dsh-plugins` @ `1a8e134d`（1 提交 / 只加 3 个文件） |
+| 提交范围 | ✅ **三个一起发**（用户 2026-09-29 明确「一起」）。已知 `dsh-feishu` 与 `imetn/dsh-lark-bridge` 品类重合 —— 若维护者判定已被覆盖，按 PR 正文里的承诺**撤掉该条、保留两个 MCP** |
 | PR | ⏳ 未开 —— **卡在仓库满 1 天门槛**：`wangbodbs/dsh-plugins` 创建于 2026-09-29T01:28:29Z，**2026-09-30 09:28（北京时间）之后**才能提 |
 
 ## ✅ 本地预演：把上游 CI 在自己机器上跑了一遍（2026-09-29）
