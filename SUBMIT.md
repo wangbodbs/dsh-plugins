@@ -46,6 +46,7 @@ python3 scripts/open-catalog-pr.py --pr       # 隔一天再跑：真正开 PR�
 | 仓库年龄 | **253.7 小时** → ✅ 1 天门槛已过（`--status` 实测） |
 | 已有 PR | **无**（`--status` 实测 `已有 PR：[]`）；市场索引 `awesome-dsh-plugin.com/plugins.json` 4460 条里**没有 `wangbodbs`**，说明还没被收录 |
 | **本次 PR** | ✅ **已开：[#6982](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/6982)** —— head `wangbodbs:add-wangbodbs-dsh-plugins @ e24bb45c`，**只加 3 个文件、0 删除**（`changed_files: 3, additions: 18, deletions: 0`），不碰任何既有条目 |
+| 上游 CI | ✅ **success**（run [37949910966](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/actions/runs/37949910966)，23:12 开始 → 23:17 完成）—— 与 09-29 的本地预演结论一致 |
 | 源码 | 已跑 `scripts/sync-from-workspace.sh` 同步到 **dsh-feishu 0.8.3**（含 0.2.1-alpha.2 的设置面板 volatile 修复）；两个 MCP 包源码本来已一致 |
 | 元数据 | 三个包统一改兼容声明；`dsh-feishu` 版本 0.7.0 → **0.8.3**；两个 MCP 补 `@deepseek-ai/dsh-mcp-client` peer |
 | 隐私/密钥 | 复查通过：真 appId / chat id / appSecret 在三个包里均**零命中**，README 里只有 `cli_xxxxxxxx` 占位符 |
