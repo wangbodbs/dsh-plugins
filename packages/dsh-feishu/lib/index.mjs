@@ -42,7 +42,7 @@ import {
 	questionErrorToast,
 	questionResponse,
 } from './cards.mjs'
-import { ConversationBook, LIST_COMMANDS, parseSessionAction, renderSessions, sessionCard } from './conversations.mjs'
+import { ConversationBook, LIST_COMMANDS, parseSessionAction, renderSessions, sessionCard, titleFromPrompt } from './conversations.mjs'
 import { chunkMarkdown, markdownCard, toPlainText } from './format.mjs'
 import { decodeSessionId, sessionIdOf } from './generations.mjs'
 import { describeAttachment, mergeForwardContainer, safeFileName } from './inbound.mjs'
@@ -940,6 +940,18 @@ export function apply(ctx, config = {}) {
 		return askApprovalByCard(chatId, request, next)
 	}, { prepend: true, global: true })
 
+	// The harness also asks its own questions through the `user-questions/request`
+	// seam — that is `ask_user_question`, and the `exit_plan_mode` plan review.
+	// The shipped answerer for it is the Web GUI's, so a Feishu conversation would
+	// sit on a dialog nobody in the chat can see, exactly like an approval did
+	// before the answerer above. `prepend` and `global` are load-bearing here for
+	// the very same two reasons.
+	ctx.on('user-questions/request', (request, next) => {
+		const chatId = chatOfSession(request?.agent?.session?.id)
+		if (chatId === undefined || api === null) return next()
+		return askQuestionsByCard(chatId, request, next)
+	}, { prepend: true, global: true })
+
 	// ---- /model: what can this harness actually talk to -------------------
 	// The catalog and the card live in `./models.mjs` (no Feishu, no plugin
 	// context) so both are unit-tested instead of only tried live.
@@ -1151,6 +1163,7 @@ export function apply(ctx, config = {}) {
 	function registerQuestion({ chatId, question, options, waitMs }) {
 		const questionId = `q${Date.now().toString(36)}-${(questionSeq++).toString(36)}`
 		const entry = {
+			kind: 'tool',
 			questionId,
 			chatId,
 			question,
@@ -1247,6 +1260,235 @@ export function apply(ctx, config = {}) {
 		log.info?.(tag(`迟到的卡片回答已交给会话（投递方式=${mode}）`))
 	}
 
+	// ---- user-questions: the harness's own questions, as cards ------------
+	// Same registry as `feishu_ask`, different answer shape: the seam wants
+	// `{ id, selected, custom? }` per question instead of a display string, so
+	// these entries remember the harness question id and settle with an object.
+
+	/**
+	 * Register one question the harness is asking through its own seam.
+	 *
+	 * @param {object} options - the question.
+	 * @param {string} options.chatId - the chat to ask in.
+	 * @param {string} options.question - the card body.
+	 * @param {readonly string[]} options.options - option labels, in display order.
+	 * @param {string} options.answerId - the harness question id echoed in the answer.
+	 * @param {number} options.waitMs - how long before we give up.
+	 * @returns {{questionId: string, answered: Promise<{id: string, selected: string[], custom?: string} | null>}} the id for the card and the answer promise.
+	 */
+	function registerSeamQuestion({ chatId, question, options, answerId, waitMs }) {
+		const questionId = `s${Date.now().toString(36)}-${(questionSeq++).toString(36)}`
+		const entry = {
+			kind: 'seam',
+			questionId,
+			answerId,
+			chatId,
+			question,
+			options,
+			settled: false,
+			expired: false,
+			/** @type {ReturnType<typeof setTimeout> | null} */ timer: null,
+			/** @type {ReturnType<typeof setTimeout> | null} */ graceTimer: null,
+			/** @type {(answer: object | null) => void} */ resolve: () => {},
+		}
+		const answered = new Promise((resolve) => { entry.resolve = resolve })
+		pendingQuestions.set(questionId, entry)
+
+		const giveUp = () => {
+			entry.timer = null
+			entry.expired = true
+			entry.settled = true
+			log.warn?.(tag(`提问超时未答（${String(Math.round(waitMs / 1000))}s），交回其它 answerer`))
+			entry.resolve(null)
+			entry.graceTimer = setTimeout(() => { pendingQuestions.delete(questionId) }, ASK_LATE_GRACE_MS)
+			entry.graceTimer.unref?.()
+		}
+		entry.timer = setTimeout(giveUp, waitMs)
+		entry.timer.unref?.()
+		return { questionId, answered }
+	}
+
+	/**
+	 * Settle a harness question with the structured answer the seam expects.
+	 * @param {object} entry - the registry entry.
+	 * @param {{id: string, selected: string[], custom?: string}} answer - the answer.
+	 * @returns {boolean} false when it had already settled.
+	 */
+	function settleSeamQuestion(entry, answer) {
+		if (entry.settled) return false
+		entry.settled = true
+		if (entry.timer !== null) clearTimeout(entry.timer)
+		if (entry.graceTimer !== null) clearTimeout(entry.graceTimer)
+		pendingQuestions.delete(entry.questionId)
+		entry.resolve(answer)
+		return true
+	}
+
+	/** Longest card body we send: Feishu rejects oversized cards outright. */
+	const SEAM_CARD_BODY_MAX = 8_000
+
+	/**
+	 * Build the card body for one harness question.
+	 *
+	 * `detail` carries the thing under discussion (an `exit_plan_mode` plan is a
+	 * `detail`), and an option's `description` has nowhere to go on a card
+	 * button, so both are folded into the body text.
+	 *
+	 * @param {object} question - one `AskUserQuestionRequest` question.
+	 * @returns {string} markdown for the card.
+	 */
+	function seamCardBody(question) {
+		const parts = [String(question?.question ?? '')]
+		const detail = typeof question?.detail === 'string' ? question.detail.trim() : ''
+		if (detail !== '') parts.push('', detail)
+		const described = (Array.isArray(question?.options) ? question.options : [])
+			.filter((option) => typeof option?.description === 'string' && option.description !== '')
+		if (described.length > 0) {
+			parts.push('', ...described.map((option) => `- **${String(option.label)}** — ${String(option.description)}`))
+		}
+		if (question?.multiSelect === true) {
+			parts.push('', '> ⚠️ 这题支持多选，但卡片一次只能回一个；其余的请写在输入框里。')
+		}
+		let body = parts.join('\n')
+		if (body.length > SEAM_CARD_BODY_MAX) {
+			body = `${body.slice(0, SEAM_CARD_BODY_MAX)}\n\n> …（正文过长，已截断）`
+		}
+		return body
+	}
+
+	/**
+	 * The option labels of a harness question, with the approving one first.
+	 *
+	 * A card emphasizes its first button, and `intent.approve` is the label the
+	 * seam reads as "yes" — so that one should be the easy click.
+	 *
+	 * @param {object} question - one `AskUserQuestionRequest` question.
+	 * @returns {string[]} up to six labels.
+	 */
+	function seamOptions(question) {
+		/** @type {string[]} */
+		const labels = []
+		for (const option of Array.isArray(question?.options) ? question.options : []) {
+			const label = String(option?.label ?? '').trim()
+			if (label !== '') labels.push(label)
+		}
+		const approve = question?.intent?.approve
+		if (typeof approve === 'string') {
+			const at = labels.indexOf(approve)
+			if (at > 0) {
+				labels.splice(at, 1)
+				labels.unshift(approve)
+			}
+		}
+		return labels.slice(0, 6)
+	}
+
+	/**
+	 * Ask a Feishu chat the questions the harness itself is asking.
+	 *
+	 * This is the answerer behind `ask_user_question` (and the `exit_plan_mode`
+	 * review). Questions go out one card at a time; a card nobody answers ends
+	 * the answerer with an error instead of parking the turn forever — the
+	 * model is told the human did not answer, which it can act on.
+	 *
+	 * @param {string} chatId - the chat to ask in.
+	 * @param {object} request - the `user-questions/request` payload.
+	 * @param {Function} next - the rest of the answerer chain.
+	 * @returns {Promise<{answers: object[]}>} the answer bundle the seam expects.
+	 */
+	async function askQuestionsByCard(chatId, request, next) {
+		const questions = Array.isArray(request?.questions) ? request.questions : []
+		if (questions.length === 0) return next()
+
+		/** @type {string[]} */
+		const waiting = []
+		const onAbort = () => {
+			for (const questionId of waiting) failQuestion(questionId, '请求被取消')
+		}
+		request?.signal?.addEventListener?.('abort', onAbort, { once: true })
+
+		try {
+			/** @type {object[]} */
+			const answers = []
+			for (const question of questions) {
+				const options = seamOptions(question)
+				const body = seamCardBody(question)
+				const { questionId, answered } = registerSeamQuestion({
+					chatId,
+					question: body,
+					options,
+					answerId: String(question?.id ?? ''),
+					waitMs: ASK_TIMEOUT_MS,
+				})
+				waiting.push(questionId)
+
+				const header = typeof question?.header === 'string' && question.header !== ''
+					? question.header
+					: (question?.intent?.kind === 'plan-review' ? '📋 计划待审批' : '❓ 需要你选一个')
+
+				try {
+					await api.sendCard({
+						receiveIdType: 'chat_id',
+						receiveId: chatId,
+						card: questionCard({ questionId, question: body, options, header }),
+					})
+				} catch (error) {
+					failQuestion(questionId, '卡片发送失败')
+					const detail = error instanceof Error ? error.message : String(error)
+					log.warn?.(tag(`提问卡片发送失败 chat=${chatId}: ${detail}`))
+					throw new Error(`无法把问题发到飞书（${detail}）`)
+				}
+				log.info?.(tag(`已发送提问卡片 chat=${chatId} 选项=${String(options.length)} 等待=${String(Math.round(ASK_TIMEOUT_MS / 1000))}s`))
+				status.lastPushAt = Date.now()
+
+				const answer = await answered
+				if (answer === null) {
+					if (request?.signal?.aborted === true) throw new Error('飞书提问已被取消')
+					throw new Error(`用户在飞书侧没有回答问题（等了 ${String(Math.round(ASK_TIMEOUT_MS / 1000))} 秒）`)
+				}
+				answers.push(answer)
+			}
+			return { answers }
+		} finally {
+			request?.signal?.removeEventListener?.('abort', onAbort)
+		}
+	}
+
+	/**
+	 * Apply one card click or typed note to a harness question.
+	 *
+	 * A click yields `{ selected: [label] }`; a note typed with no click becomes
+	 * `custom`, which is how the seam reports a free-text answer. When both
+	 * arrive, both are sent: the selected label is what a plan review reads as
+	 * approve/reject, and the note is the detail the human wanted to add.
+	 *
+	 * @param {object} entry - the pending seam entry.
+	 * @param {object} action - the parsed card action.
+	 * @param {string} action.chatId - the chat the click came from.
+	 * @param {string | undefined} action.label - the clicked option.
+	 * @param {string} action.note - the typed note.
+	 * @param {object} action.card - the answered card to render in place.
+	 * @returns {Promise<object>} the card-callback response.
+	 */
+	async function applySeamAnswer(entry, { chatId, label, note, card }) {
+		const display = label === undefined ? note : (note === '' ? label : `${label} —— 补充：${note}`)
+		if (display === '') return { toast: questionErrorToast('没看懂这次提交，请点一个按钮或写点文字') }
+		/** @type {{id: string, selected: string[], custom?: string}} */
+		const answer = label === undefined
+			? { id: entry.answerId, selected: [], custom: note }
+			: (note === '' ? { id: entry.answerId, selected: [label] } : { id: entry.answerId, selected: [label], custom: note })
+
+		if (entry.expired) {
+			await deliverLateAnswer(entry, display).catch((error) => {
+				log.warn?.(tag(`迟到回答投递失败: ${error instanceof Error ? error.message : String(error)}`))
+			})
+			return { toast: questionErrorToast('这条回答到得有点晚，已当作新消息发出'), card: { type: 'raw', data: card } }
+		}
+		settleSeamQuestion(entry, answer)
+		log.info?.(tag(`卡片回答（提问）chat=${chatId}: ${display.slice(0, 60)}`))
+		return questionResponse(label ?? note, card)
+	}
+
 	/**
 	 * Handle a card button click.
 	 *
@@ -1281,6 +1523,12 @@ export function apply(ctx, config = {}) {
 			const label = entry.options[asked.index]
 			const note = asked.note
 			const card = answeredQuestionCard({ question: entry.question, label: label ?? '', note })
+
+			// A question the harness asked (`user-questions/request`) answers
+			// with structure, not with a display string.
+			if (entry.kind === 'seam') {
+				return await applySeamAnswer(entry, { chatId, label, note, card })
+			}
 
 			if (label === undefined) {
 				// Note without a choice: treat it as the free-text answer, exactly
@@ -1416,9 +1664,43 @@ export function apply(ctx, config = {}) {
 		applyMode: (session, mode) => { setSandboxMode(session, mode) },
 		// Resolved per call: the title service may mount after this plugin.
 		titles: () => ctx.get?.('sessionTitle'),
+		// Also per call, and optional: `archivedSessionIds` is what the GUI's
+		// archive action writes, so `/sessions` hides exactly what the user hid.
+		archived: () => ctx.get?.('workspaceRegistry'),
+		// Lets the listing recover a title from a session's own log when the log
+		// holds nothing but our own `飞书 #N · <date>` placeholder.
+		ownSourceKind: PLUGIN_SOURCE_KIND,
 		pointers,
 		warn: (message) => { log.warn?.(tag(message)) },
 	})
+
+	/**
+	 * Title a Feishu generation from its first real message.
+	 *
+	 * The host's session-title service only derives titles from prompts it sees
+	 * as `source.kind === 'user'`, and what this bridge injects is stamped
+	 * `plugin:dsh-feishu` — so without this every Feishu session is called
+	 * `飞书 #N · <date>` (or nothing), which is exactly the number-and-time row the
+	 * user cannot tell apart. Written once, on the first prompt that names a
+	 * subject; never overwrites a title the user set in the GUI.
+	 *
+	 * @param {object} agent - the live agent that just received the message.
+	 * @param {string} text - the prompt as it arrived from Feishu.
+	 * @returns {void}
+	 */
+	function titleSessionFromMessage(agent, text) {
+		const titles = ctx.get?.('sessionTitle')
+		if (titles === undefined) return
+		try {
+			if (titles.get(agent.session) !== undefined) return
+			const title = titleFromPrompt(text)
+			if (title === '') return
+			titles.rename(agent.session, title)
+			log.debug?.(tag(`会话已命名: ${title}`))
+		} catch (error) {
+			log.warn?.(tag(`写入会话标题失败: ${describeTurnError(error)}`))
+		}
+	}
 
 	/**
 	 * Send the conversation switcher into a chat, falling back to plain text when
@@ -1630,6 +1912,7 @@ export function apply(ctx, config = {}) {
 				source: producerSource(),
 			}))
 			log.info?.(tag(`消息已交给会话（投递方式=${mode}${running ? '，当时有任务在跑' : '，会话空闲'}）`))
+			titleSessionFromMessage(agent, text)
 		} catch (error) {
 			// A synchronous throw here means no turn ever started, so the
 			// `turn/end` handler can never report it — say it out loud instead of
@@ -1769,7 +2052,7 @@ export function apply(ctx, config = {}) {
 	// arrives, or the deadline passes).
 	ctx.tools.register(defineTool({
 		name: 'feishu_ask',
-		description: 'Ask the user a question through Feishu and wait for the answer. Use this INSTEAD of ask_user_question whenever the conversation is happening in Feishu: ask_user_question pops a dialog on the DSH machine that the Feishu user cannot see, so the turn stalls. This sends an interactive card with one button per option — plus a free-text field the user can fill in to add detail — and returns the chosen option; when a note was typed it comes back appended as "选项 —— 补充：…". The user may also reply with plain text (which counts as the answer) or submit only the note. Returns answered=false with a reason when nobody answers in time. If the current session is not a Feishu conversation, it returns answered=false / reason="not-feishu" and you should fall back to ask_user_question.',
+		description: 'Ask the user a question through Feishu and wait for the answer. Prefer this over ask_user_question in a Feishu conversation: the timeout is yours to set and the answer comes back as a plain string. (ask_user_question also reaches Feishu now — the plugin answers it with the same kind of card — but this tool is the more predictable one.) This sends an interactive card with one button per option — plus a free-text field the user can fill in to add detail — and returns the chosen option; when a note was typed it comes back appended as "选项 —— 补充：…". The user may also reply with plain text (which counts as the answer) or submit only the note. Returns answered=false with a reason when nobody answers in time. If the current session is not a Feishu conversation, it returns answered=false / reason="not-feishu" and you should fall back to ask_user_question.',
 		parameters: {
 			question: { type: 'string', required: true, description: 'The question to ask. Markdown is allowed.' },
 			options: {

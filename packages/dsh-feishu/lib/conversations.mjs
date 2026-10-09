@@ -24,7 +24,45 @@
  */
 
 import { modeLabel } from './cards.mjs'
-import { generationOf } from './generations.mjs'
+import { generationOf, sessionIdOf } from './generations.mjs'
+
+/**
+ * The title shape this plugin itself writes in `ConversationBook#name`
+ * (`飞书 #3 · 10-09 08:22`). Such a title already carries the number and the
+ * time, so the listing shows it instead of repeating both.
+ */
+const SELF_MADE_TITLE = /^飞书\s*#\d+\s*·\s*/
+
+/**
+ * Terminal-control and invisible-character noise that must never reach a title.
+ * Same classes the host's own title normalizer strips.
+ */
+const TITLE_NOISE = [
+	/(?:\u001B\]|\u009D)(?:(?!\u0007|\u001B\\)[\s\S])*(?:\u0007|\u001B\\|$)/gu,
+	/(?:\u001B\[|\u009B)[0-?]*[ -/]*[@-~]/gu,
+	/\u001B[@-_]/gu,
+	/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu,
+	/[\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu,
+]
+
+/** A bare URL never says what a conversation was about. */
+const URL_TEXT = /(?:https?:\/\/|www\.)\S+/giu
+
+/** Leading words a derived title keeps (the host base bundle uses 5). */
+const TITLE_MAX_WORDS = 5
+
+/** UTF-8 byte budget of a derived title (the host base bundle uses 40). */
+const TITLE_MAX_BYTES = 40
+
+/** Shortest prompt worth a title: `2`, `w`, `？` are noise, not subjects. */
+const TITLE_MIN_CHARS = 3
+
+/**
+ * Length a prompt must reach to be preferred over an earlier one. A chat often
+ * opens with a bare "怎么样了" that says nothing on its own; the next message is
+ * the one that names the work.
+ */
+const TITLE_PREFERRED_CHARS = 6
 
 /** Command spellings that open a brand-new blank conversation. */
 export const NEW_COMMANDS = new Set(['/new', '/新会话', '/新对话', '/reset'])
@@ -50,14 +88,122 @@ export function stamp(at = Date.now()) {
 }
 
 /**
- * The label for one conversation button.
- * @param {{generation: number, createdAt: number}} item - one generation.
+ * Truncate text to a UTF-8 byte budget without splitting a code point.
+ *
+ * @param {string} text - already-cleaned text.
+ * @param {number} maxBytes - the byte budget.
+ * @returns {string} the longest leading prefix within the budget.
+ */
+function clipBytes(text, maxBytes) {
+	if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+	let used = 0
+	let output = ''
+	for (const character of text) {
+		const bytes = Buffer.byteLength(character, 'utf8')
+		if (used + bytes > maxBytes) break
+		output += character
+		used += bytes
+	}
+	return output
+}
+
+/**
+ * Derive a content-bearing title from one prompt.
+ *
+ * The host's own session-title service does this for GUI-typed prompts but
+ * ignores plugin-injected ones (it only folds `source.kind === 'user'`
+ * messages), so a Feishu generation would otherwise be titled only
+ * `飞书 #N · <date>` — number and time, nothing about the subject. This mirrors
+ * that fallback: clean the noise out, drop URLs, keep the leading words within
+ * the same caps (`fallbackMaxWords: 5`, `fallbackMaxBytes: 40`).
+ *
+ * @param {unknown} text - the raw user prompt.
+ * @returns {string} a title, or `''` when the prompt is not worth one.
+ */
+export function titleFromPrompt(text) {
+	const cleaned = cleanPrompt(text)
+	if (cleaned === '') return ''
+	return clipBytes(cleaned.split(' ').filter(Boolean).slice(0, TITLE_MAX_WORDS).join(' '), TITLE_MAX_BYTES).trimEnd()
+}
+
+/**
+ * The text of one prompt, freed of terminal noise and URLs, or `''` when the
+ * prompt names nothing (`2`, `w`, `？`, `……`).
+ *
+ * @param {unknown} text - the raw user prompt.
+ * @returns {string} the cleaned single-line text, or `''`.
+ */
+function cleanPrompt(text) {
+	let cleaned = String(text ?? '')
+	for (const noise of TITLE_NOISE) cleaned = cleaned.replace(noise, '')
+	cleaned = cleaned.replace(URL_TEXT, ' ').replace(/\s+/gu, ' ').trim()
+	if ([...cleaned].length < TITLE_MIN_CHARS || !/\p{L}/u.test(cleaned)) return ''
+	return cleaned
+}
+
+/**
+ * Derive a title from a generation's prompts, preferring the first one that
+ * actually names the work over a bare opening acknowledgement.
+ *
+ * @param {readonly string[]} texts - the session's own prompts, in order.
+ * @returns {string} the title, or `''` when none of them names anything.
+ */
+export function titleFromPrompts(texts) {
+	const cleaned = texts.map((text) => cleanPrompt(text)).filter((text) => text !== '')
+	if (cleaned.length === 0) return ''
+	const named = cleaned.find((text) => [...text].length >= TITLE_PREFERRED_CHARS) ?? cleaned[0]
+	return clipBytes(named.split(' ').filter(Boolean).slice(0, TITLE_MAX_WORDS).join(' '), TITLE_MAX_BYTES).trimEnd()
+}
+
+/**
+ * One generation's trailing description: its title when it has one, else the
+ * time it was created.
+ *
+ * A title this plugin wrote itself (`飞书 #3 · 10-09 08:22`) already carries the
+ * number and the time, so it is shown on its own; a title the user set in the
+ * GUI is shown next to the time, because it says nothing about when.
+ *
+ * @param {{generation: number, createdAt: number, title?: string}} item - one generation.
+ * @returns {string} the description.
+ */
+function describeSession(item) {
+	const title = typeof item.title === 'string' ? item.title.trim() : ''
+	if (title === '') return item.createdAt > 0 ? stamp(item.createdAt) : '时间未知'
+	return SELF_MADE_TITLE.test(title) ? title : `${title}  ·  ${item.createdAt > 0 ? stamp(item.createdAt) : '时间未知'}`
+}
+
+/**
+ * Shorten a title so one button label stays readable.
+ *
+ * @param {string} text - the title.
+ * @param {number} max - the maximum length before an ellipsis is added.
+ * @returns {string} the possibly shortened title.
+ */
+function clip(text, max) {
+	return text.length <= max ? text : `${text.slice(0, max - 1)}…`
+}
+
+/**
+ * The label for one conversation button: the number, then the title.
+ * @param {{generation: number, createdAt: number, title?: string}} item - one generation.
  * @param {boolean} isCurrent - whether the chat is pointed at it right now.
  * @returns {string} the button text.
  */
 function sessionButtonLabel(item, isCurrent) {
+	const title = typeof item.title === 'string' ? item.title.trim() : ''
 	const when = item.createdAt > 0 ? stamp(item.createdAt) : ''
-	const base = when === '' ? `#${String(item.generation)}` : `#${String(item.generation)} · ${when}`
+	let suffix
+	if (title === '') {
+		suffix = when === '' ? '' : ` · ${when}`
+	} else if (SELF_MADE_TITLE.test(title)) {
+		// Our own `飞书 #3 · 10-09 08:22`: the number is already on the button, so
+		// only the time part is worth repeating — no clipped, redundant label.
+		const rest = title.replace(SELF_MADE_TITLE, '').trim()
+		suffix = rest === '' ? (when === '' ? '' : ` · ${when}`) : ` · ${rest}`
+	} else {
+		suffix = ` ${clip(title, 16)}`
+	}
+	const base = `#${String(item.generation)}${suffix}`
 	return isCurrent ? `${base} ✓` : base
 }
 
@@ -67,18 +213,23 @@ function sessionButtonLabel(item, isCurrent) {
  * The card is the normal way in; this stays as the fallback for when a card
  * cannot be delivered, and as the body of `/open` errors.
  *
- * @param {{current: number, items: Array<{generation: number, sessionId: string, createdAt: number}>}} overview - what {@link ConversationBook#overview} returns.
+ * @param {{current: number, items: Array<{generation: number, sessionId: string, createdAt: number, title?: string}>, hiddenCount?: number, currentArchived?: boolean}} overview - what {@link ConversationBook#overview} returns.
  * @returns {string} the reply body.
  */
-export function renderSessions({ current, items }) {
+export function renderSessions({ current, items, hiddenCount = 0, currentArchived = false }) {
 	const lines = [`📋 本聊天的会话（当前 ▶ #${String(current)}）`]
 	if (items.length === 0) {
-		lines.push('（还没有落盘的会话；直接发消息就是第 1 段）')
+		lines.push('（还没有未归档的会话；直接发消息就是第 1 段）')
 	}
 	for (const item of items) {
 		const mark = item.generation === current ? '▶' : '　'
-		const when = item.createdAt > 0 ? stamp(item.createdAt) : '时间未知'
-		lines.push(`${mark} #${String(item.generation)}  ${when}  ${item.sessionId}`)
+		lines.push(`${mark} #${String(item.generation)}  ${describeSession(item)}`)
+	}
+	if (currentArchived) {
+		lines.push('', `⚠️ 当前指向 #${String(current)}，但这一段已被归档（所以不在上面）。发消息仍然发给它；/new 开新段，或 /open <编号> 切回上面任一段。`)
+	}
+	if (hiddenCount > 0) {
+		lines.push('', `（已省略 ${String(hiddenCount)} 个归档会话；在 DSH 界面「已归档」里能翻到）`)
 	}
 	lines.push('', '/new 开一段全新空白对话，/open <编号> 切回旧的一段。')
 	return lines.join('\n')
@@ -94,10 +245,10 @@ export function renderSessions({ current, items }) {
  * @param {{current: number, items: Array<{generation: number, sessionId: string, createdAt: number}>}} overview - the chat's generations and its current one.
  * @returns {object} a card 2.0 JSON object.
  */
-export function sessionCard({ current, items }) {
+export function sessionCard({ current, items, hiddenCount = 0, currentArchived = false }) {
 	const elements = []
 	if (items.length === 0) {
-		elements.push({ tag: 'markdown', content: '（还没有落盘的会话；直接发消息就是第 1 段）' })
+		elements.push({ tag: 'markdown', content: '（还没有未归档的会话；直接发消息就是第 1 段）' })
 	} else {
 		elements.push({
 			tag: 'markdown',
@@ -132,6 +283,15 @@ export function sessionCard({ current, items }) {
 		elements.push({ tag: 'hr' })
 		elements.push({ tag: 'markdown', content: '_`/new` 开一段全新空白对话；`/sessions` 重新出这张卡片。_' })
 	}
+	if (currentArchived) {
+		elements.push({
+			tag: 'markdown',
+			content: `⚠️ 当前指向 **#${String(current)}**，但这一段已被归档（所以不在上面）。发消息仍然发给它；\`/new\` 开新段，或点上面任一个切过去。`,
+		})
+	}
+	if (hiddenCount > 0) {
+		elements.push({ tag: 'markdown', content: `_已省略 ${String(hiddenCount)} 个归档会话 —— 它们没有删，在 DSH 界面「已归档」里能翻到。_` })
+	}
 	return {
 		schema: '2.0',
 		config: { update_multi: true },
@@ -165,15 +325,19 @@ export class ConversationBook {
 	 * @param {(session: object) => string} deps.modeOf - the session's effective file policy.
 	 * @param {(session: object, mode: string) => void} deps.applyMode - write a file policy onto a session.
 	 * @param {() => object|undefined} deps.titles - the session-title service, when the host mounts one.
+	 * @param {() => object|undefined} [deps.archived] - the workspace registry, whose `archivedSessionIds` is the authoritative archive set.
+	 * @param {string} [deps.ownSourceKind] - the `source.kind` this bridge stamps on the prompts it injects, so a session's own log can be searched for them.
 	 * @param {object} deps.pointers - the durable per-chat generation pointer.
 	 * @param {(message: string) => void} [deps.warn] - diagnostic sink for degraded paths.
 	 */
-	constructor({ sessionQuery, ensureAgent, modeOf, applyMode, titles, pointers, warn }) {
+	constructor({ sessionQuery, ensureAgent, modeOf, applyMode, titles, archived, ownSourceKind, pointers, warn }) {
 		this.sessionQuery = sessionQuery
 		this.ensureAgent = ensureAgent
 		this.modeOf = modeOf
 		this.applyMode = applyMode
 		this.titles = titles
+		this.archived = archived
+		this.ownSourceKind = ownSourceKind
 		this.pointers = pointers
 		this.warn = warn ?? (() => {})
 	}
@@ -311,11 +475,130 @@ export class ConversationBook {
 
 	/**
 	 * The chat's conversations plus the one it is pointed at.
+	 *
+	 * Archived generations are left out on purpose: the user hid them in the DSH
+	 * GUI, so a chat listing that keeps showing them is noise. They are still
+	 * reachable — `/open` works off {@link ConversationBook#generations}, which
+	 * stays complete, and `/new` keeps numbering past them.
+	 *
 	 * @param {string} chatId - the Feishu chat id.
-	 * @returns {Promise<{current: number, items: Array<{generation: number, sessionId: string, createdAt: number}>}>} everything a listing needs.
+	 * @returns {Promise<{current: number, items: Array<{generation: number, sessionId: string, createdAt: number, title: string|undefined}>, hiddenCount: number, currentArchived: boolean}>} everything a listing needs.
 	 */
 	async overview(chatId) {
-		return { current: await this.current(chatId), items: await this.generations(chatId) }
+		const current = await this.current(chatId)
+		const archived = this.archivedIds()
+		const known = await this.generations(chatId)
+		const items = []
+		for (const item of known) {
+			if (archived.has(item.sessionId)) continue
+			items.push({ ...item, title: await this.titleOf(item.sessionId) })
+		}
+		return {
+			current,
+			items,
+			hiddenCount: known.length - items.length,
+			currentArchived: archived.has(sessionIdOf(chatId, current)),
+		}
+	}
+
+	/**
+	 * The session ids the user archived, read from the workspace registry.
+	 *
+	 * A missing registry (older or leaner host) simply means "nothing archived",
+	 * which is the behaviour the listing had before archiving was honoured.
+	 *
+	 * @returns {Set<string>} the archived session ids.
+	 */
+	archivedIds() {
+		let registry
+		try {
+			registry = this.archived?.()
+		} catch (error) {
+			this.warn(`读取归档状态失败: ${describe(error)}`)
+			return new Set()
+		}
+		const ids = registry?.archivedSessionIds
+		if (ids === undefined || ids === null) return new Set()
+		try {
+			return new Set(Array.from(ids, (id) => String(id)))
+		} catch (error) {
+			this.warn(`读取归档状态失败: ${describe(error)}`)
+			return new Set()
+		}
+	}
+
+	/**
+	 * The stored title of one session, when the host can fold one out of its log.
+	 *
+	 * @param {string} sessionId - a session id from the listing.
+	 * @returns {Promise<string|undefined>} the title, or `undefined` when there is none.
+	 */
+	async storedTitle(sessionId) {
+		const read = this.sessionQuery?.readTitle
+		if (typeof read !== 'function') return undefined
+		try {
+			const title = await read.call(this.sessionQuery, sessionId)
+			return typeof title === 'string' && title.trim() !== '' ? title.trim() : undefined
+		} catch (error) {
+			// A session whose log cannot be read is not worth failing a listing over.
+			this.warn(`读取会话标题失败 (${sessionId}): ${describe(error)}`)
+			return undefined
+		}
+	}
+
+	/**
+	 * The title to show for one session: what is logged, else one derived from the
+	 * prompts this bridge injected into it.
+	 *
+	 * A title this plugin wrote before it knew any content (`飞书 #N · <date>`)
+	 * carries nothing but the number and the time, so it is treated as absent and
+	 * the session's own first substantial prompt is used instead — that way even
+	 * generations created before this existed get a readable label, without
+	 * rewriting anyone's session log.
+	 *
+	 * @param {string} sessionId - a session id from the listing.
+	 * @returns {Promise<string|undefined>} the title, or `undefined` when there is none.
+	 */
+	async titleOf(sessionId) {
+		const stored = await this.storedTitle(sessionId)
+		if (stored !== undefined && !SELF_MADE_TITLE.test(stored)) return stored
+		const derived = await this.derivedTitle(sessionId)
+		return derived ?? stored
+	}
+
+	/**
+	 * Derive a title from the first substantial prompt this bridge put into a
+	 * session, read back from that session's own surface.
+	 *
+	 * @param {string} sessionId - a session id from the listing.
+	 * @returns {Promise<string|undefined>} the derived title, or `undefined`.
+	 */
+	async derivedTitle(sessionId) {
+		const read = this.sessionQuery?.readSurface
+		if (typeof read !== 'function' || this.ownSourceKind === undefined) return undefined
+		let events
+		try {
+			const surface = await read.call(this.sessionQuery, sessionId)
+			events = Array.isArray(surface?.events) ? surface.events : []
+		} catch (error) {
+			this.warn(`读取会话内容失败 (${sessionId}): ${describe(error)}`)
+			return undefined
+		}
+		const texts = []
+		for (const event of events) {
+			if (event?.type !== 'user/message' || event?.data?.source?.kind !== this.ownSourceKind) continue
+			const blocks = Array.isArray(event.data.content) ? event.data.content : []
+			const text = blocks
+				.filter((block) => block?.type === 'text' && typeof block.text === 'string')
+				.map((block) => block.text)
+				.join('\n')
+			// The bridge's own notices (an inbound file, a late answer) are stamped
+			// with the same producer source, and they are not what the chat is about.
+			if (text.startsWith('（')) continue
+			texts.push(text)
+		}
+		const title = titleFromPrompts(texts)
+		return title === '' ? undefined : title
 	}
 
 	/**

@@ -35,6 +35,15 @@ const ACK_OK = 200
 const DISCOVERY_TIMEOUT_MS = 15_000
 
 /**
+ * How many reconnect attempts use the short exponential backoff before falling
+ * back to the interval the server suggests.
+ */
+const FAST_RETRY_ATTEMPTS = 5
+
+/** Ceiling for a fast retry. The server suggests ~90–120 s, which is too coarse. */
+const FAST_RETRY_MAX_MS = 16_000
+
+/**
  * A no-op logger, used when the host passes none.
  * @type {{info: Function, warn: Function, error: Function, debug: Function}}
  */
@@ -313,11 +322,19 @@ export class FeishuLongConnection {
     void this.#connectLoop()
   }
 
-  /** Wait the server-specified reconnect delay plus jitter. */
+  /**
+   * Wait before the next attempt.
+   *
+   * The server suggests a 90–120 s reconnect interval, but events that arrive
+   * while we are down are simply lost (Feishu does not replay them to a closed
+   * long connection), so a 2-minute blind window swallows user messages. The
+   * first few attempts therefore back off exponentially from 1 s; only after
+   * those are exhausted does the server's interval apply.
+   */
   async #sleepBeforeReconnect() {
-    const base = this.wsConfig.reconnectIntervalMs
-    const jitter = Math.random() * this.wsConfig.reconnectNonceMs
-    const delay = Math.max(1_000, base + jitter)
+    const serverDelay = Math.max(1_000, this.wsConfig.reconnectIntervalMs + Math.random() * this.wsConfig.reconnectNonceMs)
+    const fastDelay = Math.min(1_000 * 2 ** Math.max(0, this.attempts), FAST_RETRY_MAX_MS)
+    const delay = this.attempts <= FAST_RETRY_ATTEMPTS ? fastDelay : serverDelay
     this.log.debug?.(`[dsh-feishu] ${String(Math.round(delay / 1000))}s 后重连`)
     await new Promise((resolve) => {
       this.reconnectTimer = setTimeout(resolve, delay)

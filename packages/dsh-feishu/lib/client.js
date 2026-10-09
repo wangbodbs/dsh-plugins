@@ -417,6 +417,20 @@ window.__ModuleLoader__.load({
 			}, 'dsh-feishu: styles')
 
 			const register = ctx.slots.register.bind(ctx.slots)
+			// DSH 0.2.0-rc.2 moved plugin configuration from the flat
+			// `settings.plugin.item` list to Settings *sections*: the settings shell
+			// renders `settings.section` and builds the nav from its entries, while
+			// `settings.plugin.item` no longer exists. Registering only the old slot
+			// is exactly why this card disappeared from 设置 after the upgrade.
+			// Register both — each host renders the slot it knows, the other stays
+			// dormant (an injected slot that is never declared simply never fires).
+			ctx.slots.inject('settings.section', () => register({
+				name: 'settings.section',
+				id: NAMESPACE,
+				order: 60,
+				label: () => '飞书',
+				inject: () => ({ scope, degraded }),
+			}, FeishuSettingsCard))
 			ctx.slots.inject('settings.plugin.item', () => register({
 				name: 'settings.plugin.item',
 				key: NAMESPACE,
