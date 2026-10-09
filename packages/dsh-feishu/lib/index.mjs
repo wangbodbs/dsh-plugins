@@ -16,8 +16,8 @@
  * @module dsh-feishu
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, extname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { basename, dirname, extname, join } from 'node:path'
 
 import * as settingsApi from '@deepseek-ai/dsh-settings'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -26,7 +26,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SANDBOX_MODES, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import z from '@deepseek-ai/schemastery'
 
-import { DEFAULT_DOMAIN, FeishuApi, messageText } from './api.mjs'
+import { DEFAULT_DOMAIN, FeishuApi, MAX_IMAGE_BYTES, messageText } from './api.mjs'
 import {
 	answeredApprovalCard,
 	answeredQuestionCard,
@@ -104,24 +104,82 @@ const ASK_LATE_GRACE_MS = 10 * 60 * 1000
 /** Same-origin route the GUI settings card reads for live bridge status. */
 const STATUS_ROUTE = '/plugins/dsh-feishu/status'
 
+/**
+ * Mark one Config field as live-editable ("volatile" in schemastery terms).
+ *
+ * DSH 0.2.1-alpha.2 projects plugin `Config` schemas into the settings service,
+ * and **only fields beneath a `.volatile()` node are offered to the GUI and
+ * accepted on write**: `volatileForm()` returns `undefined` for a schema with no
+ * volatile field, so this plugin's row is dropped from the settings mirror
+ * entirely. The symptoms are quiet rather than loud:
+ *
+ *   * the card renders every field EMPTY — 「启用」 looks off even while the
+ *     bridge is connected, because the value it would show never arrived;
+ *   * every save is refused ("Plugin entry "feishu" has no volatile fields" →
+ *     `settings/rejected`) and the card can only say 「宿主拒绝了这次写入」;
+ *   * the bridge itself keeps running from the profile patch, so Feishu still
+ *     works and nothing looks broken on that side.
+ *
+ * Older cores have no `volatile()` on the schema prototype, so it is probed
+ * rather than assumed: there the field stays ordinary and the row is configured
+ * from the profile patch exactly as before.
+ *
+ * @param {object} schema - schemastery field schema.
+ * @returns {object} the same schema, marked volatile when the core supports it.
+ */
+const live = (schema) => (typeof schema.volatile === 'function' ? schema.volatile() : schema)
+
+/**
+ * Cross-copy flag of a cosmokit volatile reference — the same `Symbol.for` key
+ * `createVolatile` stamps, so it is recognized without importing cosmokit.
+ */
+const kVolatile = Symbol.for('cosmokit.volatile.write')
+
+/**
+ * Unwrap one parsed config value into ordinary data.
+ *
+ * A core that projects this schema into the settings service hands every
+ * `.volatile()`-marked field back as a cosmokit **reference**
+ * (`{ get(), [kVolatile] }`) rather than the value itself — that is exactly why
+ * core plugins read `this.config.provider.get()`. Reading the box directly is
+ * silently wrong in the worst way: `enabled` is then an object, so
+ * `enabled === true` is false, `typeof appId === 'string'` is false, and the
+ * bridge reports 「未启用」 forever while the GUI looks perfectly configured.
+ *
+ * Everything in this module reads through {@link plainConfig}, so ordinary
+ * values are what the rest of the code sees on both generations (older cores
+ * have no volatile fields, and the walk is then an identity copy).
+ *
+ * @param {unknown} value - parsed config field, reference, or container.
+ * @returns {unknown} ordinary data, with every reference replaced by its snapshot.
+ */
+export function plainConfig(value) {
+	if (value !== null && typeof value === 'object' && kVolatile in value) return plainConfig(value.get())
+	if (Array.isArray(value)) return value.map(plainConfig)
+	if (value !== null && typeof value === 'object') {
+		return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, plainConfig(child)]))
+	}
+	return value
+}
+
 /** Configuration schema — also the GUI settings section. */
 export const Config = z.object({
 	/** Whether the bridge runs at all. */
-	enabled: z.boolean().default(false),
+	enabled: live(z.boolean().default(false)),
 	/** Self-built app id (`cli_...`). */
-	appId: z.string().default(''),
+	appId: live(z.string().default('')),
 	/** Self-built app secret. */
-	appSecret: z.string().role('secret').default(''),
+	appSecret: live(z.string().role('secret').default('')),
 	/** Open-platform origin; change only for Lark (international). */
-	domain: z.string().default(DEFAULT_DOMAIN),
+	domain: live(z.string().default(DEFAULT_DOMAIN)),
 	/** Working directory new sessions use. Empty means the host's cwd. */
-	cwd: z.string().default(''),
+	cwd: live(z.string().default('')),
 	/** Chat ids allowed to drive the agent. Empty means "any chat". */
-	allowedChatIds: z.array(z.string()).default([]),
+	allowedChatIds: live(z.array(z.string()).default([])),
 	/** React with an emoji as soon as a message is accepted. */
-	ackReaction: z.boolean().default(true),
+	ackReaction: live(z.boolean().default(true)),
 	/** Send the assistant's answer back to Feishu. */
-	replyToChat: z.boolean().default(true),
+	replyToChat: live(z.boolean().default(true)),
 	/**
 	 * How an inbound Feishu message reaches a chat's agent **while a turn is
 	 * already running**.
@@ -133,7 +191,7 @@ export const Config = z.object({
 	 *
 	 * User 2026-09-29: 「正在运行任务的时候通过飞书发送消息默认插队，而不是排队」.
 	 */
-	sendMode: z.union([z.const('steer'), z.const('queue')]).default('steer'),
+	sendMode: live(z.union([z.const('steer'), z.const('queue')]).default('steer')),
 })
 
 /**
@@ -168,7 +226,12 @@ function installFeishuSettings(ctx, config, hooks) {
 			settingsApi.installSettingsSection(ctx, settingsApi.settingsNamespace(FEISHU_NAMESPACE), Config, config, hooks)
 			return
 		}
-		ctx.logger?.warn?.(tag('设置面板 API 不可用，飞书配置改为只读（用 patch 行配置）'))
+		// DSH 0.2.x removed both install helpers: the settings service projects the
+		// plugin's live `Config` (through `configEditor`) on its own, so there is
+		// nothing to install here. This is NOT a degraded host — the one thing that
+		// still has to be true is that the schema fields are marked `live()`
+		// (volatile), otherwise the row is filtered out of the settings mirror.
+		ctx.logger?.debug?.(tag('核心按 Config 自动投影设置表单（无需 installSection）；字段须标 volatile 才能在面板里可写'))
 	} catch (error) {
 		ctx.logger?.warn?.(tag(`设置面板注册失败（不影响运行）: ${error instanceof Error ? error.message : String(error)}`))
 	}
@@ -180,8 +243,16 @@ function installFeishuSettings(ctx, config, hooks) {
  * @param {object} config - the row config.
  */
 export function apply(ctx, config = {}) {
-	/** Live config: the settings section replaces this source once mounted. */
-	let current = () => config
+	/**
+	 * Raw config source: the loader's row, or whatever the settings section pushed
+	 * once mounted. Never read directly — volatile fields are boxed here.
+	 */
+	let source = () => config
+	/**
+	 * Live config for every reader in this module: `source()` with the volatile
+	 * references of the mutable fields unwrapped (see {@link plainConfig}).
+	 */
+	const current = () => plainConfig(source())
 
 	// DSH routes plugin logs to the GUI, not to stdout, so a socket-level bridge
 	// is undebuggable from a terminal. Tee everything into a file as well.
@@ -470,6 +541,57 @@ export function apply(ctx, config = {}) {
 		}
 		log.info?.(tag(`已推送到飞书 chat=${chatId} chars=${String(text.length)}`))
 		status.lastPushAt = Date.now()
+	}
+
+	/** Extensions Feishu's image decoder accepts on `/im/v1/images`. */
+	const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.ico', '.tif', '.tiff', '.heic'])
+
+	/**
+	 * Split the `image` argument into paths.
+	 *
+	 * One string listing several paths is easier for a model to fill in than a
+	 * nested array, so newlines and commas both work as separators.
+	 *
+	 * @param {unknown} value - the raw argument.
+	 * @returns {string[]} the paths, in order.
+	 */
+	function parseImagePaths(value) {
+		if (typeof value !== 'string') return []
+		return value.split(/[\n,]/).map((part) => part.trim()).filter((part) => part !== '')
+	}
+
+	/**
+	 * Upload one local picture and post it into the chat as an image message.
+	 *
+	 * Feishu decodes an upload by its file extension, so the extension is checked
+	 * here instead of letting the API answer with an opaque error. Oversized
+	 * pictures are refused with the recipe for shrinking them: this plugin is
+	 * dependency-free and cannot resize anything itself.
+	 *
+	 * @param {string} chatId - the destination chat.
+	 * @param {string} file - path to the picture on disk.
+	 * @returns {Promise<string>} the `image_key` Feishu assigned.
+	 * @throws {Error} when the picture cannot be read, is too big, or is not a format Feishu takes.
+	 */
+	async function sendLocalImage(chatId, file) {
+		const extension = extname(file).toLowerCase()
+		if (!IMAGE_EXTENSIONS.has(extension)) {
+			throw new Error(`不是飞书认得的图片格式（${extension === '' ? '没有扩展名' : extension}），支持：${[...IMAGE_EXTENSIONS].join(' ')}`)
+		}
+		let bytes
+		try {
+			bytes = readFileSync(file)
+		} catch (error) {
+			throw new Error(`读不到这个文件：${error instanceof Error ? error.message : String(error)}`)
+		}
+		if (bytes.length > MAX_IMAGE_BYTES) {
+			throw new Error(`图片 ${(bytes.length / 1048576).toFixed(1)}MB 超过飞书 10MB 上限，请先压小（例如 ffmpeg -i 原图 -vf scale=1600:-2 -q:v 4 输出.jpg）`)
+		}
+		const imageKey = await api.uploadImage({ bytes, fileName: basename(file) })
+		await api.sendImage({ receiveIdType: 'chat_id', receiveId: chatId, imageKey })
+		status.lastPushAt = Date.now()
+		log.info?.(tag(`已推送图片到飞书 chat=${chatId} file=${basename(file)} ${(bytes.length / 1024).toFixed(0)}KB`))
+		return imageKey
 	}
 
 	/**
@@ -1926,9 +2048,10 @@ export function apply(ctx, config = {}) {
 	// ---- a tool so the agent can push to Feishu on its own ---------------
 	ctx.tools.register(defineTool({
 		name: 'feishu_send',
-		description: 'Send a message to a Feishu chat through the running dsh-feishu bridge. Use it to proactively report progress on long-running work, or to answer when you were asked to push something to Feishu. Markdown is welcome (the bridge renders it in a card; plain Feishu text would show the markup literally). Omit chat_id to reply to the chat that most recently messaged this agent.',
+		description: 'Send a message and/or local pictures to a Feishu chat through the running dsh-feishu bridge. Use it to proactively report progress on long-running work, or to answer when you were asked to push something to Feishu. Markdown is welcome (the bridge renders it in a card; plain Feishu text would show the markup literally). Write `image` when the user should actually SEE a picture: a card cannot render a local path, so merely naming a file inside `text` shows them nothing. Omit chat_id to reply to the chat that most recently messaged this agent.',
 		parameters: {
-			text: { type: 'string', required: true, description: 'Message body to send.' },
+			text: { type: 'string', description: 'Message body to send, as a card. Optional when `image` is set.' },
+			image: { type: 'string', description: 'Absolute path(s) of local picture(s) to upload and post as image messages. Separate several paths with newlines or commas. jpg/jpeg/png/webp/gif/bmp/ico/tif/tiff/heic, each under 10MB.' },
 			chat_id: { type: 'string', description: 'Target Feishu chat id (oc_...). Defaults to the most recent chat that talked to this agent.' },
 		},
 		output: {
@@ -1938,23 +2061,45 @@ export function apply(ctx, config = {}) {
 				properties: {
 					chatId: { type: 'string', required: true },
 					sent: { type: 'boolean', required: true },
+					images: { type: 'number', required: true },
+					failed: { type: 'string', required: true },
 				},
 			},
-			render: (_args, value) => [{
-				type: 'text',
-				text: value.sent
-					? `Sent to Feishu chat ${value.chatId}. Do not repeat the message in your reply.`
-					: 'Feishu bridge is not connected; nothing was sent.',
-			}],
+			render: (_args, value) => {
+				if (!value.sent && value.images === 0 && value.failed === '') {
+					return [{ type: 'text', text: 'Feishu bridge is not connected; nothing was sent.' }]
+				}
+				let text = `Sent to Feishu chat ${value.chatId}`
+				if (value.images > 0) text += ` plus ${String(value.images)} image(s)`
+				text += '.'
+				if (value.failed !== '') text += ` Not sent: ${value.failed}`
+				text += ' Do not repeat this in your reply.'
+				return [{ type: 'text', text }]
+			},
 		},
 		async execute(args, exec) {
 			const explicit = typeof args.chat_id === 'string' && args.chat_id !== '' ? args.chat_id : undefined
 			const sessionId = exec.agent?.session?.id
 			const chatId = explicit ?? chatOfSession(sessionId)
-			if (chatId === undefined || api === null) return { chatId: '', sent: false }
+			if (chatId === undefined || api === null) {
+				return { chatId: '', sent: false, images: 0, failed: 'Feishu bridge is not connected' }
+			}
 			if (sessionId !== undefined) repliedViaTool.add(sessionId)
-			await sendToChat(chatId, String(args.text))
-			return { chatId, sent: true }
+
+			const text = typeof args.text === 'string' ? args.text : ''
+			if (text.trim() !== '') await sendToChat(chatId, text)
+
+			const failures = []
+			let images = 0
+			for (const file of parseImagePaths(args.image)) {
+				try {
+					await sendLocalImage(chatId, file)
+					images += 1
+				} catch (error) {
+					failures.push(`${basename(file)}: ${error instanceof Error ? error.message : String(error)}`)
+				}
+			}
+			return { chatId, sent: text.trim() !== '' || images > 0, images, failed: failures.join('; ') }
 		},
 	}))
 
@@ -2286,10 +2431,20 @@ export function apply(ctx, config = {}) {
 		},
 	}), 'dsh-feishu: status route')
 
+	// A settings write only reaches a plugin through the volatile channel: the loader
+	// updates the marked fields **in place** and emits `loader/volatile-update` with the
+	// changed paths — it does NOT remount the fiber, which is exactly what marking a
+	// field volatile buys. Without this listener a GUI save would leave the old
+	// credentials in the running long connection until the next restart, while the card
+	// and the form both claim 「保存即生效」. `startBridge()` is idempotent (it keeps a
+	// signature of the config it connected with), so repeated emissions cost nothing.
+	ctx.on('loader/volatile-update', () => { startBridge() })
+
 	// Mounted last so the bridge already exists when the stored settings arrive
-	// and trigger their first onChange.
-	installFeishuSettings(ctx, config, {
-		setSource: (source) => { current = source },
+	// and trigger their first onChange. On legacy cores the section takes this row
+	// config as its initial value, so hand it ordinary data, not volatile boxes.
+	installFeishuSettings(ctx, plainConfig(config), {
+		setSource: (next) => { source = next },
 		onChange: () => { startBridge() },
 	})
 }

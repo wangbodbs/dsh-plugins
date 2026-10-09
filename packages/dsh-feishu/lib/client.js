@@ -165,6 +165,15 @@ window.__ModuleLoader__.load({
 			/** True when neither `configForms` nor `settingsScope` exists on this host. */
 			const degraded = props.degraded === true
 			const [snapshot, setSnapshot] = react.useState(() => scope.getSnapshot())
+			/**
+			 * True when the host serves no form for this entry: the settings mirror is
+			 * loaded, but this namespace is missing from it (`ConfigFormController.derive`
+			 * marks that state `unavailable`). That is exactly what a core does when no
+			 * `Config` field is marked `.volatile()` — the card has no value to render and
+			 * every write would be refused, so it says that instead of showing empty
+			 * fields as if they were the real configuration.
+			 */
+			const formMissing = !degraded && snapshot?.status === 'unavailable'
 			const [status, setStatus] = react.useState(null)
 			const [statusError, setStatusError] = react.useState('')
 			const [saving, setSaving] = react.useState(false)
@@ -244,7 +253,9 @@ window.__ModuleLoader__.load({
 					const refuse = () => {
 						throw new Error(degraded
 							? '这个 DSH 版本没有提供设置表单服务（configForms / settingsScope），卡片只能看桥接状态，改配置请直接编辑 profile 的 cordis.patch.yml'
-							: '宿主拒绝了这次写入，请刷新后重试（若反复被拒，直接改 profile 的 cordis.patch.yml）')
+							: formMissing
+								? '宿主没有为「飞书」这一项提供可写表单（设置镜像里没有它，通常意味着 Config 字段没标 .volatile()）：改配置请直接编辑 profile 的 cordis.patch.yml'
+								: '宿主拒绝了这次写入，请刷新后重试（若反复被拒，直接改 profile 的 cordis.patch.yml）')
 					}
 					if (await scope.set('enabled', enabled) === false) refuse()
 					await scope.set('appId', appId.trim())
@@ -338,6 +349,10 @@ window.__ModuleLoader__.load({
 					degraded
 						? h('div', { className: 'dsh-fs-msg', 'data-kind': 'err', key: 'dg' },
 							'这个 DSH 版本没有提供设置表单服务（configForms / settingsScope）：卡片仍显示桥接状态，但保存会被拒绝 —— 改配置请直接编辑 profile 的 cordis.patch.yml，或把插件升级到支持该版本的一版。')
+						: null,
+					formMissing
+						? h('div', { className: 'dsh-fs-msg', 'data-kind': 'err', key: 'fm' },
+							'宿主的设置镜像里没有「飞书」这一项：下面显示的空值不是真实配置（桥接状态才是真的），保存也会被拒。通常是插件 Config 的字段没标 .volatile() —— 改配置请编辑 profile 的 cordis.patch.yml，或把插件升级到 0.8.3+。')
 						: null,
 
 					h('div', { className: 'dsh-fs-grid', key: 'form' }, [

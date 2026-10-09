@@ -248,7 +248,7 @@ export function buttonName(index, questionId) {
  * @param {object} options - card contents.
  * @param {string} options.questionId - opaque id echoed back by the controls.
  * @param {string} options.question - the question body (markdown).
- * @param {readonly string[]} options.options - answer buttons, in display order.
+ * @param {readonly string[]} options.options - answer buttons, in display order. May be empty when the question has no options at all — the note field is then the whole answer surface.
  * @param {string} [options.header] - card title.
  * @param {string} [options.hint] - small print under the question.
  * @param {string} [options.notePlaceholder] - placeholder of the free-text field.
@@ -278,7 +278,9 @@ export function questionCard({
 	const body = [
 		String(question),
 		'',
-		hint ?? '> 点按钮回答。想补充点什么，就写在下面的输入框里，会和选项一起回来。',
+		hint ?? (buttons.length === 0
+			? '> 直接在下面的输入框里写回答，写完点输入框的发送按钮。'
+			: '> 点按钮回答。想补充点什么，就写在下面的输入框里，会和选项一起回来。'),
 	].join('\n')
 
 	return {
@@ -305,15 +307,20 @@ export function questionCard({
 							// be routed to this question.
 							behaviors: [{ type: 'callback', value: { type: QUESTION_ACTION_TYPE, questionId } }],
 						},
-						{
-							tag: 'column_set',
-							flex_mode: 'flow',
-							columns: buttons.map((button) => ({
-								tag: 'column',
-								width: 'auto',
-								elements: [button],
-							})),
-						},
+						// A question may carry no options at all (`ask_user_question`
+						// allows it): an empty `column_set` would only render a blank
+						// row, so the input alone becomes the answer surface.
+						...(buttons.length > 0
+							? [{
+								tag: 'column_set',
+								flex_mode: 'flow',
+								columns: buttons.map((button) => ({
+									tag: 'column',
+									width: 'auto',
+									elements: [button],
+								})),
+							}]
+							: []),
 					],
 				},
 			],

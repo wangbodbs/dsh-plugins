@@ -39,8 +39,41 @@ try {
   const mod = await import(join(scratch, 'lib', 'index.mjs'))
   console.log(`   ✓ 加载成功 name=${String(mod.name)}`)
   console.log(`   ✓ inject=${JSON.stringify(mod.inject)}`)
-  console.log(`   ✓ Config 校验: ${JSON.stringify(mod.Config({}))}`)
+  console.log(`   ✓ Config 校验（解箱后）: ${JSON.stringify(mod.plainConfig(mod.Config({})))}`)
   console.log(`   ✓ apply 是函数: ${typeof mod.apply === 'function'}`)
+
+  // 当前核心的 schemastery 是否有 `volatile()`：老核心没有，`live()` 就是恒等包装。
+  const volatilitySupported = typeof mod.Config.dict?.enabled?.volatile === 'function'
+
+  // ⚠️ 回归护栏（2026-10-09）：`.volatile()` 的代价是**值被装箱** —— 解析出来的 volatile
+  // 字段是 cosmokit 引用 `{ get(), [Symbol.for('cosmokit.volatile.write')] }`，不是值本身
+  // （核心插件都写 `this.config.x.get()`）。谁忘了解箱，`enabled === true` / `typeof appId
+  // === 'string'` 就永远不成立：桥接看着「已启用」，实际永远停在「未启用」。
+  // 所以这里直接断言 `plainConfig` 能把整套解析结果还原成普通值。
+  const parsedDefaults = mod.Config({})
+  const boxed = typeof parsedDefaults.enabled?.get === 'function'
+  const plain = mod.plainConfig(parsedDefaults)
+  const plainOk = plain.enabled === false && plain.appId === '' && plain.appSecret === ''
+    && typeof plain.domain === 'string' && plain.cwd === '' && Array.isArray(plain.allowedChatIds)
+    && plain.ackReaction === true && plain.replyToChat === true && plain.sendMode === 'steer'
+  console.log(plainOk && (!volatilitySupported || boxed)
+    ? `   ✓ volatile 装箱已解：${JSON.stringify(plain)}${boxed ? '（确认解析结果确实是引用，不是裸值）' : ''}`
+    : `   ✗ 解箱不对（boxed=${String(boxed)}）: ${JSON.stringify(plain)}`)
+
+  // ⚠️ 回归护栏（2026-10-09，DSH 0.2.1-alpha.2 实测）：核心把插件的 Config schema 投影成
+  // 设置表单，而**只有标了 `.volatile()` 的字段**才算可写（`volatileForm()` 对没有任何 volatile
+  // 字段的 schema 返回 undefined）。不标的表现很安静：`describe()` 把这一行整个过滤掉 →
+  // 卡片字段全空（「启用」看着是关的，其实桥接连着）、每次保存被拒
+  // （`Plugin entry "feishu" has no volatile fields` → settings/rejected），而桥接照旧从
+  // profile patch 跑 —— 用户看到的就是「显示是关的但飞书能用，保存还说宿主拒绝」。
+  // 下面这 9 个就是卡片会写的那 9 个字段：少标一个就少一个能存。
+  const editableFields = ['enabled', 'appId', 'appSecret', 'domain', 'cwd', 'allowedChatIds', 'ackReaction', 'replyToChat', 'sendMode']
+  const notLive = volatilitySupported ? editableFields.filter((key) => mod.Config.dict?.[key]?.meta?.volatile !== true) : []
+  console.log(volatilitySupported
+    ? (notLive.length === 0
+      ? `   ✓ Config 的 ${String(editableFields.length)} 个可编辑字段全标了 volatile（DSH 0.2.1+ 的设置面板才认）`
+      : `   ✗ 这些字段没标 volatile → 设置面板会整行消失、保存必被拒: ${notLive.join(' / ')}`)
+    : '   – 当前核心的 schemastery 没有 volatile()（旧核心），跳过可写表单门禁检查')
 
   console.log('2) apply() 干跑（未启用，不应联网）…')
   /** @type {Array<() => unknown>} */
@@ -98,6 +131,13 @@ try {
   console.log(missing.length === 0
     ? '   ✓ inject 覆盖全部依赖（含 sandboxPolicy / agentPresets / llm）'
     : `   ✗ inject 缺: ${missing.join(', ')}`)
+
+  // ⚠️ 回归护栏（2026-10-09）：volatile 字段是**原地更新**的（loader 不重挂 fiber，只发
+  // `loader/volatile-update`），所以「保存即生效」全靠这个监听器把桥接按新配置重连一次。
+  // 少了它，GUI 会显示已保存、桥接却仍用旧凭据跑到下次重启 —— 静默的半个失效。
+  console.log(listeners.some((entry) => entry.event === 'loader/volatile-update')
+    ? '   ✓ 监听 loader/volatile-update → 保存后桥接按新配置重连（volatile 不重挂 fiber）'
+    : '   ✗ 没监听 loader/volatile-update：GUI 保存后桥接不会重连，会一直用旧凭据')
 
   console.log('3) `/permission` 卡片与回调（纯函数，不联网）…')
   const cards = await import(join(scratch, 'lib', 'cards.mjs'))
@@ -400,6 +440,37 @@ try {
   console.log(downstreamCalls === 2 && strangersApproval === 'rejected' && offlineApproval === 'rejected'
     ? '   ✓ 非飞书会话、以及桥接未连接时都原样交回下一个 answerer（GUI 行为不变）'
     : `   ✗ 交回逻辑不对: calls=${String(downstreamCalls)} / ${String(strangersApproval)} / ${String(offlineApproval)}`)
+
+  console.log('3e2) 提问 answerer：DSH 自己的问题也走飞书卡片（假宿主，不联网）…')
+  const seamListener = listeners.find((entry) => entry.event === 'user-questions/request')?.listener
+  console.log(typeof seamListener === 'function'
+    ? '   ✓ apply() 注册了 user-questions/request 监听器（ask_user_question 的 answerer）'
+    : '   ✗ 没有注册 user-questions/request 监听器')
+  // 与审批同一条理由：瀑布是**串行**的，GUI 那条在启动期就注册了并会把请求停在自己的
+  // 弹窗上。不 prepend，飞书会话的提问照样卡住 —— 这正是这次要修的 bug。
+  const seamRegistration = listeners.find((entry) => entry.event === 'user-questions/request')
+  const seamRegistrationOptions = seamRegistration?.options ?? {}
+  console.log(seamRegistrationOptions.prepend === true && seamRegistrationOptions.global === true
+    ? '   ✓ 用 { prepend: true, global: true } 注册 —— 抢在 GUI 弹窗之前，且不受 scope 过滤'
+    : `   ✗ 注册选项不对（会被 GUI 抢先）: ${JSON.stringify(seamRegistrationOptions)}`)
+  let seamDownstreamCalls = 0
+  const seamNext = () => { seamDownstreamCalls += 1; return Promise.resolve({ answers: [{ id: 'x', selected: ['下游'] }] }) }
+  const strangerSeam = await seamListener({ agent: { session: { id: 'session-not-feishu' } }, questions: [{ id: 'q1', question: '?' }] }, seamNext)
+  const offlineSeam = await seamListener({ agent: { session: { id: 'feishu-oc_offline' } }, questions: [{ id: 'q1', question: '?' }] }, seamNext)
+  console.log(seamDownstreamCalls === 2
+    && JSON.stringify(strangerSeam) === JSON.stringify(offlineSeam)
+    && strangerSeam?.answers?.[0]?.selected?.[0] === '下游'
+    ? '   ✓ 非飞书会话、以及桥接未连接时都原样交回下一个 answerer（GUI 行为不变）'
+    : `   ✗ 交回逻辑不对: calls=${String(seamDownstreamCalls)} / ${JSON.stringify(strangerSeam)} / ${JSON.stringify(offlineSeam)}`)
+  // 没有选项的提问（`ask_user_question` 允许）：卡片只留输入框，不留一行空按钮。
+  const bareAsk = cards.questionCard({ questionId: 's_smoke', question: '这条没有选项', options: [] })
+  const bareForm = bareAsk.body.elements.find((element) => element.tag === 'form')
+  console.log(bareForm.elements.length === 1 && bareForm.elements[0].tag === 'input'
+    ? '   ✓ 无选项的提问卡只有输入框（没有空的按钮行）'
+    : `   ✗ 无选项卡片不对: ${JSON.stringify(bareForm.elements.map((element) => element.tag))}`)
+  console.log(cards.parseQuestionAction({ input_value: '直接写', form_value: { ask_note: '直接写' } })?.note === '直接写'
+    ? '   ✓ 纯输入提交能被识别（没有按钮的卡片也能答）'
+    : '   ✗ 纯输入提交识别不了')
 
   console.log('3f) 入站附件识别（纯函数，不联网）…')
   const inbound = await import(join(scratch, 'lib', 'inbound.mjs'))
@@ -729,7 +800,15 @@ try {
   const rawFollowup = (commentless.match(/agent\.followup\(/g) ?? []).length
   const deliverCalls = (commentless.match(/= deliverUserMessage\(agent,/g) ?? []).length
   const steerWired = commentless.includes("typeof agent.steer === 'function'") && commentless.includes('agent.steer(message)')
-  const defaultSteer = /sendMode:\s*z\.union\(\[z\.const\('steer'\),\s*z\.const\('queue'\)\]\)\.default\('steer'\)/.test(commentless)
+  // 默认值直接读 schema，不抠源码文本：`live(...)`（0.8.3 起的 volatile 包装）套在外面后，
+  // 原来那条 `sendMode: z.union(...)` 正则就会误报。
+  const defaultSteer = mod.Config.dict?.sendMode?.meta?.default === 'steer'
+  // 9 个可编辑字段都必须经 `live()` 包装 —— 语义检查（上面的 meta.volatile）只在新核心上跑得动，
+  // 这条源码计数在旧核心上也盯着，防止哪天改配置时漏掉一个包装。
+  const liveWraps = (commentless.match(/live\(z\./g) ?? []).length
+  console.log(defaultSteer && liveWraps === 9
+    ? '   ✓ sendMode 默认 steer，且 9 个可编辑字段都走 live()（volatile）包装'
+    : `   ✗ sendMode 默认/live 包装不对（默认 steer=${String(defaultSteer)}；live(z. …) 包装=${String(liveWraps)} 应为 9）`)
   console.log(rawFollowup === 1 && deliverCalls === 4 && steerWired && defaultSteer
     ? '   ✓ 入站消息默认插队：4 条路径走 deliverUserMessage，steer 优先、sendMode 默认 steer（裸 followup 只剩兜底那 1 处）'
     : `   ✗ 插队接线不对（裸 followup=${String(rawFollowup)} 应为 1；deliverUserMessage 调用=${String(deliverCalls)} 应为 4；steer 接线=${String(steerWired)}；默认 steer=${String(defaultSteer)}）——用户要求任务运行中发来的飞书消息默认插队`)
@@ -783,6 +862,18 @@ try {
   console.log(modeControls.length === 0
     ? '   ✓ 卡片带「任务运行中收到消息」开关（插队/排队），并写回 sendMode'
     : `   ✗ 卡片缺 sendMode 控件接线: ${modeControls.join(' / ')}`)
+
+  // 回归护栏（2026-10-09）：宿主上一代没有可写表单时，卡片必须**说出原因**，而不是把空值
+  // 当真实配置显示、再在保存时丢一句「宿主拒绝了这次写入，请刷新后重试」——那次就是这么
+  // 把人绕进去的（看着是关的、其实连着、保存又说不清为什么拒）。
+  const formMissingWiring = [
+    "snapshot?.status === 'unavailable'",
+    'formMissing',
+    '没有为「飞书」这一项提供可写表单',
+  ].filter((needle) => !clientSource.includes(needle))
+  console.log(formMissingWiring.length === 0
+    ? '   ✓ 宿主没提供可写表单时，卡片明说原因（不再只报「刷新后重试」）'
+    : `   ✗ 卡片缺「宿主无可写表单」诊断接线: ${formMissingWiring.join(' / ')}`)
 
   /** Build a minimal client ctx with the given services, capturing the slot descriptor. */
   const makeHost = (services) => {

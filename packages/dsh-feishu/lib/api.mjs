@@ -21,6 +21,16 @@ const REQUEST_TIMEOUT_MS = 20_000
 const CHUNK_BYTES = 32 * 1024 * 1024
 
 /**
+ * Largest image Feishu accepts on `/im/v1/images`. Anything bigger is refused
+ * outright, and this client is dependency-free — it cannot resize a picture, so
+ * the caller has to shrink it before handing it over.
+ */
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+/** Pushing a picture upstream is slower than a JSON call, so it gets its own budget. */
+const UPLOAD_TIMEOUT_MS = 120_000
+
+/**
  * An error carrying Feishu's own `code`/`msg` so callers can react to them.
  */
 export class FeishuApiError extends Error {
@@ -150,6 +160,76 @@ export class FeishuApi {
    */
   async sendCard({ receiveIdType, receiveId, card }) {
     return this.#sendMessage({ receiveIdType, receiveId, msgType: 'interactive', content: card })
+  }
+
+  /**
+   * Send an image message (`msg_type: image`).
+   *
+   * @param {object} options - the image message.
+   * @param {'chat_id'|'open_id'|'user_id'|'union_id'|'email'} options.receiveIdType - how to interpret `receiveId`.
+   * @param {string} options.receiveId - the destination id.
+   * @param {string} options.imageKey - an `image_key` from {@link FeishuApi#uploadImage}.
+   * @returns {Promise<{messageId: string, chatId: string}>} the created message.
+   */
+  async sendImage({ receiveIdType, receiveId, imageKey }) {
+    return this.#sendMessage({ receiveIdType, receiveId, msgType: 'image', content: { image_key: imageKey } })
+  }
+
+  /**
+   * Upload one image and get back its `image_key`.
+   *
+   * Feishu wants `multipart/form-data` here, not the JSON envelope `#request`
+   * speaks, so this is a hand-rolled call like the resource download. The
+   * picture has to be under {@link MAX_IMAGE_BYTES}.
+   *
+   * @param {object} options - the upload.
+   * @param {Buffer} options.bytes - the encoded image.
+   * @param {string} options.fileName - name handed to Feishu; its extension picks the decoder.
+   * @param {'message'|'avatar'} [options.imageType] - what the image is for.
+   * @returns {Promise<string>} the `image_key` to send with.
+   */
+  async uploadImage({ bytes, fileName, imageType = 'message' }) {
+    const path = '/open-apis/im/v1/images'
+    const form = new FormData()
+    form.append('image_type', imageType)
+    form.append('image', new Blob([bytes]), fileName)
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => { controller.abort() }, UPLOAD_TIMEOUT_MS)
+    let response
+    try {
+      response = await fetch(`${this.domain}${path}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${await this.tenantToken()}` },
+        body: form,
+        signal: controller.signal,
+      })
+    } catch (error) {
+      throw new FeishuApiError(
+        `图片上传失败: ${error instanceof Error ? error.message : String(error)}`,
+        { path },
+      )
+    } finally {
+      clearTimeout(timer)
+    }
+
+    let payload
+    try {
+      payload = await response.json()
+    } catch {
+      throw new FeishuApiError(`图片上传返回了非 JSON 响应 (HTTP ${String(response.status)})`, { path, status: response.status })
+    }
+    if (payload?.code !== 0) {
+      throw new FeishuApiError(
+        `图片上传失败: code=${String(payload?.code)} msg=${String(payload?.msg)}`,
+        { code: payload?.code, path, status: response.status },
+      )
+    }
+    const key = payload?.data?.image_key
+    if (typeof key !== 'string' || key === '') {
+      throw new FeishuApiError('飞书未返回 image_key', { code: payload?.code, path })
+    }
+    return key
   }
 
   /**

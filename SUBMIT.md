@@ -39,6 +39,16 @@ python3 scripts/open-catalog-pr.py --pr       # 隔一天再跑：真正开 PR�
 | 提交范围 | ✅ **三个一起发**（用户 2026-09-29 明确「一起」）。已知 `dsh-feishu` 与 `imetn/dsh-lark-bridge` 品类重合 —— 若维护者判定已被覆盖，按 PR 正文里的承诺**撤掉该条、保留两个 MCP** |
 | PR | ⏳ 未开 —— **卡在仓库满 1 天门槛**：`wangbodbs/dsh-plugins` 创建于 2026-09-29T01:28:29Z，**2026-09-30 09:28（北京时间）之后**才能提 |
 
+### 2026-10-09：门槛早过了，正式开 PR（并先修掉两处会让市场判「不兼容」的声明）
+
+| 项 | 值 |
+|---|---|
+| 仓库年龄 | **253.7 小时** → ✅ 1 天门槛已过（`--status` 实测） |
+| 已有 PR | **无**（`--status` 实测 `已有 PR：[]`）；市场索引 `awesome-dsh-plugin.com/plugins.json` 4460 条里**没有 `wangbodbs`**，说明还没被收录 |
+| 源码 | 已跑 `scripts/sync-from-workspace.sh` 同步到 **dsh-feishu 0.8.3**（含 0.2.1-alpha.2 的设置面板 volatile 修复）；两个 MCP 包源码本来已一致 |
+| 元数据 | 三个包统一改兼容声明；`dsh-feishu` 版本 0.7.0 → **0.8.3**；两个 MCP 补 `@deepseek-ai/dsh-mcp-client` peer |
+| 隐私/密钥 | 复查通过：真 appId / chat id / appSecret 在三个包里均**零命中**，README 里只有 `cli_xxxxxxxx` 占位符 |
+
 ## ✅ 本地预演：把上游 CI 在自己机器上跑了一遍（2026-09-29）
 
 等 24h 的时间里，把上游 `pr-check` 的每一步在本地复现了一遍（`data/plugins/` 放进三个条目并提交，
@@ -106,6 +116,20 @@ CI 会检查被收录仓库的**年龄 ≥ 1 天**（`contributing.md` 里写明
 所以它平时不发作，只在 npm 侧变成 `ERESOLVE`。
 
 因此本仓库的声明方式：
+
+**2026-10-09 补测（用市场自己的判定函数，`dshmarket/lib/discovery-compatibility.js` + `includePrerelease: true`）**：
+判定是**合取**的 —— `engines.dsh` 与**每一条命中宿主清单的 `@deepseek-ai/dsh*` peer** 都必须满足，
+一条 `<0.2.0` 就能把整体判成 `incompatible`（宿主升到 0.2.x 之后，市场会给这三个包挂"不兼容"）：
+
+| 声明 | 0.1.7-rc.2 | 0.2.0-rc.2 | 0.2.1-alpha.2 |
+|---|---|---|---|
+| 原样：`engines.dsh: >=0.1.0-rc.5 <0.2.0-0` + 同款 peer | compatible | **incompatible** | **incompatible** |
+| 只放宽 `engines.dsh` 到 `<0.3.0-0`（peer 不动） | compatible | compatible | **incompatible** |
+| **`engines.dsh` 与 peers 都写 `>=0.1.0-rc.5 <0.2.0-0 \|\| >=0.2.0-0 <0.3.0-0`** | compatible | compatible | **compatible** |
+
+⇒ 三个包统一采用最后一种写法（也最贴 contributing.md 的「显式 `||` 预发布分支」建议：npm 严格
+semver 下 `0.2.0-rc.2` 无需 `includePrerelease` 即满足，另两种都要靠 includePrerelease）。
+两个 `dsh-mcp-*` 另补 `@deepseek-ai/dsh-mcp-client` peer —— 它们运行时 `import` 这个包却一直没声明。
 
 - **`engines.dsh`** —— 承担「宿主版本要求」的表达。市场读它，并且是**带 `includePrerelease: true`**
   求值的（`dshmarket/lib/discovery-compatibility.js:74`），所以 `>=0.1.0-rc.5 <0.2.0-0` 在市场和卡片上

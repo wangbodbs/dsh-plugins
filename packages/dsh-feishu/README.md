@@ -12,8 +12,11 @@
 （只读 / 工作区可写 / 完全访问）——不用回电脑上点界面。
 
 **`feishu_ask` 工具**让 agent 反过来问你：它推一张带选项按钮的问题卡片，你点一下就作答
-（卡片上还有输入框，可以顺手写补充说明；也可以直接回文字）。这是 `ask_user_question` 的飞书替代品——后者弹的是**本机 GUI 对话框**，
-你在飞书里看不到，那一轮会一直空等到超时。见下面「问用户一个问题」。
+（卡片上还有输入框，可以顺手写补充说明；也可以直接回文字）。见下面「问用户一个问题」。
+
+模型的 `ask_user_question`（以及 plan mode 的计划审批）也走**同一种卡片**：插件注册了
+`user-questions/request` 的 answerer，所以即使模型直接用了那个工具，问题也会推到飞书，
+而不是停在本机那张你看不见的 GUI 弹窗上。见下面「DSH 自己的提问也会到飞书」。
 
 发 **`/new`** 开一段**全新空白**的对话，旧的一段原样保留（历史、还能切回去、在 GUI 里也能翻到），
 **`/sessions`** 推一张**卡片**：这个聊天的每一段一个按钮，**点一下就把对话切过去**（等价 `/open 2`）。见下面「会话代次」。
@@ -97,12 +100,25 @@ dsh plugin --profile web add "$(ls -1 dist/dsh-feishu-*.tgz | sort -V | tail -1)
 - **操作提示**：飞书后台要配的两处（长连接订阅方式、`im.message.receive_v1` 与
   `card.action.trigger` 两个事件）直接写在面板里。
 
-保存即生效（写进 `~/.dsh/settings.yaml`，0600，**不用重启**）——桥接会按新配置重连。
+保存即生效（**不用重启**）——桥接会按新配置重连。落盘位置随 DSH 代次而变：0.2.x 写进 profile 的
+`~/.dsh/profiles/<profile>/cordis.patch.yml`（老的 0.1.x 写 `~/.dsh/settings.yaml`）。0.2.x 的重连
+走 volatile 通道 —— loader 原地更新字段并广播 `loader/volatile-update`，插件监听它重连（见下面 0.8.3）。
 
 > ⚠️ **只有服务端的 settings 段是不够的**：DSH 的设置页会枚举命名空间，但卡片必须由插件自己的
 > 浏览器端注册到 `settings.plugin.item` 槽（key = 命名空间）。只装服务端那一半，设置页里
 > 那一栏是**空的**。这就是 `lib/client.js` + `package.json` 的 `dsh.client` / `exports["./client"]`
 > 存在的原因。
+
+> ⚠️ **0.2.1-alpha.2 起，可编辑字段必须标 `.volatile()`，否则整行从设置镜像里消失**（0.8.3 已修）：
+> 核心把插件的 `Config` 投影成设置表单，只认标了 volatile 的字段 —— `volatileForm()` 对没有任何
+> volatile 字段的 schema 返回 `undefined`，于是这一行既不显示值也不接受写入，而桥接照旧从 patch
+> 跑。症状极具误导性：**GUI 里「启用」看着是关的、字段全空，每次保存都报「宿主拒绝了这次写入」，
+> 但飞书本身一切正常**。字段用 `live()` 包装（老核心没有 `volatile()` 时自动退化为普通字段）。
+>
+> 代价是**值被装箱**：解析出来的 volatile 字段是 cosmokit 引用 `{ get(), [Symbol.for('cosmokit.volatile.write')] }`，
+> 不是值本身（核心插件都写 `this.config.x.get()`）。所以本插件所有读取都过 `plainConfig()` 解箱 ——
+> 谁绕过它直接读，`enabled === true` / `typeof appId === 'string'` 就永远不成立，桥接会永远停在
+> 「未启用」。`tools/smoke.mjs` 对这三件事（字段标 volatile、解箱、监听 volatile 更新）都有护栏。
 
 **B. patch 行** —— 在 profile 的 `~/.dsh/profiles/web/cordis.patch.yml` 末尾追加：
 
@@ -165,6 +181,28 @@ DSH 问权限走的是 `approval/request` **waterfall**（一串 "answerer"）�
 
 > ⚠️ 前提是会话的 approval policy 是 `ask`。policy 为 `never` 时 DSH 直接拒掉，
 > 根本不会问任何人，也就不会有卡片。用 **`/approval`** 看当前策略、`/approval ask` 打开询问。
+
+## DSH 自己的提问也会到飞书（`ask_user_question` / 计划审批）
+
+跟权限审批同一个道理：DSH 自己的提问走 `user-questions/request` **waterfall**，而出厂只装了
+Web GUI 那一个 answerer —— 对话发生在飞书时，问题就停在本机那张没人看得见的弹窗上，
+直到模型那一轮被取消。本插件注册了自己的 answerer：
+
+- **只拦截属于自己的会话**（从 session id 反推 chatId）；其它会话原样 `next()`，GUI 行为不变。
+- 注册带 **`{ prepend: true, global: true }`**，理由与审批 answerer 完全相同（见上一节）：
+  瀑布是串行的，而 GUI 那条在启动期就注册了。
+- 问题渲染成和 `feishu_ask` 一样的卡片（按钮 + 补充输入框）。`detail`（例如 `exit_plan_mode`
+  待审的计划全文）与选项的 `description` 都折进正文；正文超过 8000 字符会截断并注明。
+- 一次请求里有**多个问题**时逐条发卡，答完一条再发下一条。
+- **没有选项**的提问（`ask_user_question` 允许）只留输入框 —— 直接写字就是答案。
+- 计划审批（`intent: plan-review`）会把「批准」那个选项排到第一位并高亮。
+- 点击与输入都会转成 seam 要求的答案形状 `{ id, selected, custom? }`；点了按钮又补了文字时
+  两个都给 —— 计划审批靠 `selected` 里的「批准」判定，补充文字不该把它挤掉。
+- **10 分钟没人答** → answerer 以错误结束，模型会被告知「飞书侧没有回答」，
+  它可以换个问法或先做别的；**不会**把这一轮永久挂住。
+
+> `feishu_ask` 仍然更可控（自定义超时、`hint`、返回好读的字符串），能主动选它就用它。
+> 这条 answerer 是**兜底**：保证模型即使直接调了 `ask_user_question` 也不会卡住。
 
 ## 收到附件（文件 / 图片）
 
@@ -351,10 +389,13 @@ agent 的回答天然带格式，所以 bridge 推出去的东西**一律走卡�
 
 ## 问用户一个问题：`feishu_ask`
 
-**在飞书会话里，agent 提问必须用 `feishu_ask`，不能用 `ask_user_question`。**
+**`feishu_ask` 是首选**：超时自己定、可以给 `hint`、返回的是好读的字符串。
 
-原因是后者弹的是 DSH **本机的 GUI 对话框**：你人在飞书，机器前没人，那一轮就卡在
-「等你点确定」上，直到工具超时——你只会看到对话停住。`feishu_ask` 把同一件事搬到聊天里：
+曾经是「必须用它」，因为 `ask_user_question` 弹的是 DSH **本机的 GUI 对话框**：你人在飞书，
+机器前没人，那一轮就卡在「等你点确定」上，直到工具超时——你只会看到对话停住。
+**0.8.0 起这不再是坑**：插件注册了 `user-questions/request` 的 answerer，`ask_user_question`
+也会推成同款卡片（见「DSH 自己的提问也会到飞书」），即使模型直接用了它也不会卡住。
+`feishu_ask` 把同一件事搬到聊天里：
 
 ```
 ❓ 需要你选一个                                  ← 卡片标题
@@ -507,8 +548,18 @@ await ctx.agents.resume({ resumeSessionId: sessionId, setup: composition.setup }
 
 | 工具 | 参数 | 用途 |
 |---|---|---|
-| `feishu_send` | `text`（必填）、`chat_id`（可选） | 主动往飞书会话推消息；不给 `chat_id` 就回到最近跟这个 agent 说过话的会话 |
-| `feishu_ask` | `question`、`options`（必填）、`header`、`hint`、`timeout_seconds`、`chat_id` | 推一张带选项按钮 + **补充输入框**的问题卡片，并**等你的回答**（点击 / 输入框 / 文字）；飞书会话里代替 `ask_user_question` |
+| `feishu_send` | `text`（可选）、`image`（可选）、`chat_id`（可选） | 主动往飞书会话推消息**和/或本地图片**；不给 `chat_id` 就回到最近跟这个 agent 说过话的会话 |
+| `feishu_ask` | `question`、`options`（必填）、`header`、`hint`、`timeout_seconds`、`chat_id` | 推一张带选项按钮 + **补充输入框**的问题卡片，并**等你的回答**（点击 / 输入框 / 文字）；比 `ask_user_question` 更可控（超时、提示语），但飞书会话里两者都能用 |
+
+### 发图片（0.8.2 起）
+
+`feishu_send` 的 `image` 参数收**本地图片的绝对路径**，多张用换行或逗号分隔。桥接把每张图先传到
+`POST /open-apis/im/v1/images` 换回 `image_key`，再以 `msg_type=image` 单独发一条图片消息。
+
+- 支持 `.jpg .jpeg .png .webp .gif .bmp .ico .tif .tiff .heic`，**每张必须 < 10MB**（飞书硬限）。
+- 超限**不会自动压缩**：本插件零依赖、没有图像缩放能力，会直接报错并附上压图命令。
+- ⚠️ 卡片**渲染不了本地路径**：只在 `text` 里写 `/path/x.png`，飞书那边什么都看不到，必须用 `image`。
+- 单张失败不拖累其余：返回值 `images` = 成功张数，`failed` = 失败清单。
 
 ## 自检
 
@@ -526,7 +577,7 @@ node tools/probe.mjs    # 只测长连接：连上后去飞书给机器人发条
 lib/pbbp2.mjs        pbbp2.Frame / Header 的 protobuf 编解码 + 事件分片合并
 lib/ws.mjs           长连接：握手、心跳、重连、事件 ACK（ACK 同时承载卡片回调响应）
 lib/api.mjs          OpenAPI 客户端：tenant_access_token、发文本/卡片、回复、加表情
-lib/cards.mjs        `/permission` 与 `feishu_ask` 两类交互卡片的构造、按钮 value 解析、回调响应组装
+lib/cards.mjs        `/permission`、`feishu_ask` 与 `ask_user_question` 三类交互卡片的构造、按钮 value 解析、回调响应组装（无选项的提问只留输入框）
 lib/generations.mjs  会话代次与 session id 的纯映射（`feishu-<chat>[-<n>]` ⇄ n，含 `decodeSessionId` 反查）
 lib/models.mjs       `/model` 的模型目录与切换卡片：归一化 catalog、渲染文本/卡片、解析按钮 value（可单测）
 lib/progress.mjs     大文件进度播报的时间节流（假时钟可测）
@@ -538,7 +589,7 @@ lib/conversations.mjs `/new` / `/sessions` / `/open` 的语义本体 + `/session
 lib/state.mjs        每个 chat 的「当前段」指针（<DSH_HOME>/dsh-feishu.state.json，损坏只降级）
 lib/paths.mjs        <DSH_HOME> 的解析（日志与指针共用）
 lib/log.mjs          插件独立诊断日志（<DSH_HOME>/dsh-feishu.log，2MB 轮转）
-lib/index.mjs        服务端本体：设置段、preset 装配、会话映射、事件循环、命令分发、feishu_send、feishu_ask、状态路由
+lib/index.mjs        服务端本体：设置段、preset 装配、会话映射、事件循环、命令分发、feishu_send、feishu_ask、审批与提问两个 answerer、状态路由
 lib/client.js        浏览器端：设置面板卡片（`settings.plugin.item` 槽，key=feishu）
 tools/smoke.mjs      服务端加载 + apply 干跑 + 卡片纯函数 + 会话命令（假宿主）+ 浏览器端模块加载（改完代码先跑这个）
 tools/probe.mjs      只测长连接的独立探针

@@ -7,9 +7,9 @@ DSH bundle. There is no bundle at the root — the root is only a container.
 
 | Package | What it does | Requires |
 |---|---|---|
-| [`dsh-feishu`](packages/dsh-feishu) | Talk to DSH from Feishu / Lark: a chat maps to a DSH session, messages become turns, answers are pushed back as interactive cards | DSH ≥ 0.1.0-rc.5, Node ≥ 22 |
-| [`dsh-mcp-flapi`](packages/dsh-mcp-flapi) | Registers FilmLight's official FLAPI MCP assistant (`flapi-dev-mcp`) as an MCP server in DSH | DSH ≥ 0.1.0-rc.5, Node ≥ 20, a FilmLight FLAPI install |
-| [`dsh-mcp-davinci-resolve`](packages/dsh-mcp-davinci-resolve) | Registers the MCP server built into DaVinci Resolve 21.1+ as an MCP server in DSH | DSH ≥ 0.1.0-rc.5, Node ≥ 20, DaVinci Resolve 21.1+ |
+| [`dsh-feishu`](packages/dsh-feishu) | Talk to DSH from Feishu / Lark: a chat maps to a DSH session, messages become turns, answers are pushed back as interactive cards | DSH ≥ 0.1.0-rc.5 (0.1.x and 0.2.x both verified), Node ≥ 22 |
+| [`dsh-mcp-flapi`](packages/dsh-mcp-flapi) | Registers FilmLight's official FLAPI MCP assistant (`flapi-dev-mcp`) as an MCP server in DSH | DSH ≥ 0.1.0-rc.5 (0.1.x and 0.2.x both verified), Node ≥ 20, a FilmLight FLAPI install |
+| [`dsh-mcp-davinci-resolve`](packages/dsh-mcp-davinci-resolve) | Registers the MCP server built into DaVinci Resolve 21.1+ as an MCP server in DSH | DSH ≥ 0.1.0-rc.5 (0.1.x and 0.2.x both verified), Node ≥ 20, DaVinci Resolve 21.1+ |
 
 ## Install
 
